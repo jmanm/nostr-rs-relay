@@ -4,7 +4,7 @@ use crate::config::Settings;
 use serde::{Deserialize, Serialize};
 
 pub const CARGO_PKG_VERSION: Option<&'static str> = option_env!("CARGO_PKG_VERSION");
-pub const UNIT: &str = "sats";
+pub const UNIT: &str = "msats";
 
 /// Limitations of the relay as specified in NIP-111
 /// (This nip isn't finalized so may change)
@@ -13,6 +13,9 @@ pub const UNIT: &str = "sats";
 pub struct Limitation {
     #[serde(skip_serializing_if = "Option::is_none")]
     payment_required: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    restricted_writes: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -45,6 +48,8 @@ pub struct RelayInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub contact: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub supported_nips: Option<Vec<i64>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub software: Option<String>,
@@ -61,7 +66,7 @@ pub struct RelayInfo {
 /// Convert an Info configuration into public Relay Info
 impl From<Settings> for RelayInfo {
     fn from(c: Settings) -> Self {
-        let mut supported_nips = vec![1, 2, 9, 11, 12, 15, 16, 20, 22, 33, 40, 42];
+        let mut supported_nips = vec![1, 2, 9, 11, 12, 15, 16, 20, 22, 33, 40];
 
         if c.authorization.nip42_auth {
             supported_nips.push(42);
@@ -73,12 +78,18 @@ impl From<Settings> for RelayInfo {
 
         let limitations = Limitation {
             payment_required: Some(p.enabled),
+            restricted_writes: Some(
+                p.enabled
+                    || c.verified_users.is_enabled()
+                    || c.authorization.pubkey_whitelist.is_some()
+                    || c.grpc.restricts_write,
+            ),
         };
 
         let (payment_url, fees) = if p.enabled {
             let admission_fee = if p.admission_cost > 0 {
                 Some(vec![Fee {
-                    amount: p.admission_cost,
+                    amount: p.admission_cost * 1000,
                     unit: UNIT.to_string(),
                 }])
             } else {
@@ -87,7 +98,7 @@ impl From<Settings> for RelayInfo {
 
             let post_fee = if p.cost_per_event > 0 {
                 Some(vec![Fee {
-                    amount: p.cost_per_event,
+                    amount: p.cost_per_event * 1000,
                     unit: UNIT.to_string(),
                 }])
             } else {
@@ -124,6 +135,7 @@ impl From<Settings> for RelayInfo {
             limitation: Some(limitations),
             payment_url,
             fees,
+            icon: i.relay_icon,
         }
     }
 }

@@ -20,7 +20,7 @@ pub fn main() -> Result<()> {
     let _trace_sub = tracing_subscriber::fmt::try_init();
     println!("Nostr-rs-relay Bulk Loader");
     // check for a database file, or create one.
-    let settings = config::Settings::new(&None);
+    let settings = config::Settings::new(&None)?;
     if !Path::new(&settings.database.data_directory).is_dir() {
         info!("Database directory does not exist");
         return Err(Error::DatabaseDirError);
@@ -143,7 +143,7 @@ fn write_event(tx: &Transaction, e: Event) -> Result<usize> {
     let event_id = tx.last_insert_rowid();
     // look at each event, and each tag, creating new tag entries if appropriate.
     for t in e.tags.iter().filter(|x| x.len() > 1) {
-        let tagname = t.get(0).unwrap();
+        let tagname = t.first().unwrap();
         let tagnamechar_opt = single_char_tagname(tagname);
         if tagnamechar_opt.is_none() {
             continue;

@@ -11,6 +11,7 @@ use crate::repo::NostrRepo;
 use crate::server::NostrMetrics;
 use governor::clock::Clock;
 use governor::{Quota, RateLimiter};
+use log::LevelFilter;
 use nostr::key::FromPkStr;
 use nostr::key::Keys;
 use r2d2;
@@ -20,7 +21,6 @@ use sqlx::ConnectOptions;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
-use tracing::log::LevelFilter;
 use tracing::{debug, info, trace, warn};
 
 pub type SqlitePool = r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>;
@@ -45,8 +45,8 @@ pub const DB_FILE: &str = "nostr.db";
 /// Will panic if the pool could not be created.
 pub async fn build_repo(settings: &Settings, metrics: NostrMetrics) -> Arc<dyn NostrRepo> {
     match settings.database.engine.as_str() {
-        "sqlite" => Arc::new(build_sqlite_pool(&settings, metrics).await),
-        "postgres" => Arc::new(build_postgres_pool(&settings, metrics).await),
+        "sqlite" => Arc::new(build_sqlite_pool(settings, metrics).await),
+        "postgres" => Arc::new(build_postgres_pool(settings, metrics).await),
         _ => panic!("Unknown database engine"),
     }
 }
@@ -261,7 +261,7 @@ pub async fn db_writer(
                     ) => {
                         // User does not exist
                         info!("Unregistered user");
-                        if settings.pay_to_relay.sign_ups {
+                        if settings.pay_to_relay.sign_ups && settings.pay_to_relay.direct_message {
                             payment_tx
                                 .send(PaymentMessage::NewAccount(event.pubkey))
                                 .ok();
@@ -378,7 +378,7 @@ pub async fn db_writer(
                         notice_tx
                             .try_send(Notice::blocked(
                                 event.id,
-                                &decision.message().unwrap_or_else(|| "".to_string()),
+                                &decision.message().unwrap_or_default(),
                             ))
                             .ok();
                         continue;
@@ -401,6 +401,9 @@ pub async fn db_writer(
                 start.elapsed()
             );
             event_write = true;
+
+            // send OK message
+            notice_tx.try_send(Notice::saved(event.id)).ok();
         } else {
             match repo.write_event(&event).await {
                 Ok(updated) => {

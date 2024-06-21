@@ -30,6 +30,8 @@ use hyper::upgrade::Upgraded;
 use hyper::{
     header, server::conn::AddrStream, upgrade, Body, Request, Response, Server, StatusCode,
 };
+use nostr::key::FromPkStr;
+use nostr::key::Keys;
 use prometheus::IntCounterVec;
 use prometheus::IntGauge;
 use prometheus::{Encoder, Histogram, HistogramOpts, IntCounter, Opts, Registry, TextEncoder};
@@ -60,8 +62,6 @@ use tungstenite::error::Error as WsError;
 use tungstenite::handshake;
 use tungstenite::protocol::Message;
 use tungstenite::protocol::WebSocketConfig;
-use nostr::key::FromPkStr;
-use nostr::key::Keys;
 
 /// Handle arbitrary HTTP requests, including for `WebSocket` upgrades.
 #[allow(clippy::too_many_arguments)]
@@ -653,6 +653,7 @@ fn get_header_string(header: &str, headers: &HeaderMap) -> Option<String> {
 async fn ctrl_c_or_signal(mut shutdown_signal: Receiver<()>) {
     let mut term_signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .expect("could not define signal");
+    #[allow(clippy::never_loop)]
     loop {
         tokio::select! {
             _ = shutdown_signal.recv() => {
@@ -827,7 +828,7 @@ pub fn start_server(settings: &Settings, shutdown_rx: MpscReceiver<()>) -> Resul
         info!("listening on: {}", socket_addr);
         // all client-submitted valid events are broadcast to every
         // other client on this channel.  This should be large enough
-        // to accomodate slower readers (messages are dropped if
+        // to accommodate slower readers (messages are dropped if
         // clients can not keep up).
         let (bcast_tx, _) = broadcast::channel::<Event>(broadcast_buffer_limit);
         // validated events that need to be persisted are sent to the
@@ -1029,25 +1030,23 @@ fn make_notice_message(notice: &Notice) -> Message {
     Message::text(json.to_string())
 }
 
-fn allowed_to_send(event_str: &String, conn: &conn::ClientConn, settings: &Settings) -> bool {
+fn allowed_to_send(event_str: &str, conn: &conn::ClientConn, settings: &Settings) -> bool {
     // TODO: pass in kind so that we can avoid deserialization for most events
     if settings.authorization.nip42_dms {
         match serde_json::from_str::<Event>(event_str) {
             Ok(event) => {
-                if event.kind == 4 {
+                if event.kind == 4 || event.kind == 44 || event.kind == 1059 {
                     match (conn.auth_pubkey(), event.tag_values_by_name("p").first()) {
                         (Some(auth_pubkey), Some(recipient_pubkey)) => {
                             recipient_pubkey == auth_pubkey || &event.pubkey == auth_pubkey
-                        },
-                        (_, _) => {
-                            false
-                        },
+                        }
+                        (_, _) => false,
                     }
                 } else {
                     true
                 }
-            },
-            Err(_) => false
+            }
+            Err(_) => false,
         }
     } else {
         true
@@ -1125,8 +1124,8 @@ async fn nostr_server(
 
     let unspec = "<unspecified>".to_string();
     info!("new client connection (cid: {}, ip: {:?})", cid, conn.ip());
-    let origin = client_info.origin.as_ref().unwrap_or_else(|| &unspec);
-    let user_agent = client_info.user_agent.as_ref().unwrap_or_else(|| &unspec);
+    let origin = client_info.origin.as_ref().unwrap_or(&unspec);
+    let user_agent = client_info.user_agent.as_ref().unwrap_or(&unspec);
     info!(
         "cid: {}, origin: {:?}, user-agent: {:?}",
         cid, origin, user_agent
@@ -1175,14 +1174,12 @@ async fn nostr_server(
                 if query_result.event == "EOSE" {
                     let send_str = format!("[\"EOSE\",\"{subesc}\"]");
                     ws_stream.send(Message::Text(send_str)).await.ok();
-                } else {
-                    if allowed_to_send(&query_result.event, &conn, &settings) {
-                        metrics.sent_events.with_label_values(&["db"]).inc();
-                        client_received_event_count += 1;
-                        // send a result
-                        let send_str = format!("[\"EVENT\",\"{}\",{}]", subesc, &query_result.event);
-                        ws_stream.send(Message::Text(send_str)).await.ok();
-                    }
+                } else if allowed_to_send(&query_result.event, &conn, &settings) {
+                    metrics.sent_events.with_label_values(&["db"]).inc();
+                    client_received_event_count += 1;
+                    // send a result
+                    let send_str = format!("[\"EVENT\",\"{}\",{}]", subesc, &query_result.event);
+                    ws_stream.send(Message::Text(send_str)).await.ok();
                 }
             },
             // TODO: consider logging the LaggedRecv error
@@ -1265,7 +1262,6 @@ async fn nostr_server(
                         // handle each type of message
                         let evid = ec.event_id().to_owned();
                         let parsed : Result<EventWrapper> = Result::<EventWrapper>::from(ec);
-                        metrics.cmd_event.inc();
                         match parsed {
                             Ok(WrappedEvent(e)) => {
                                 metrics.cmd_event.inc();
@@ -1278,7 +1274,7 @@ async fn nostr_server(
                                     // check if the event is too far in the future.
                                 } else if e.is_valid_timestamp(settings.options.reject_future_seconds) {
                                     // Write this to the database.
-                                    let auth_pubkey = conn.auth_pubkey().and_then(|pubkey| hex::decode(&pubkey).ok());
+                                    let auth_pubkey = conn.auth_pubkey().and_then(|pubkey| hex::decode(pubkey).ok());
                                     let submit_event = SubmittedEvent {
                                         event: e.clone(),
                                         notice_tx: notice_tx.clone(),
@@ -1307,7 +1303,7 @@ async fn nostr_server(
                                             error!("AUTH command received, but relay_url is not set in the config file (cid: {})", cid);
                                         },
                                         Some(relay) => {
-                                            match conn.authenticate(&event, &relay) {
+                                            match conn.authenticate(&event, relay) {
                                                 Ok(_) => {
                                                     let pubkey = match conn.auth_pubkey() {
                                                         Some(k) => k.chars().take(8).collect(),
@@ -1317,7 +1313,7 @@ async fn nostr_server(
                                                 },
                                                 Err(e) => {
                                                     info!("authentication error: {} (cid: {})", e, cid);
-                                                    ws_stream.send(make_notice_message(&Notice::message(format!("Authentication error: {e}")))).await.ok();
+                                                    ws_stream.send(make_notice_message(&Notice::restricted(event.id, format!("authentication error: {e}").as_str()))).await.ok();
                                                 },
                                             }
                                         }
@@ -1346,9 +1342,14 @@ async fn nostr_server(
                         if conn.has_subscription(&s) {
                             info!("client sent duplicate subscription, ignoring (cid: {}, sub: {:?})", cid, s.id);
                         } else {
-                metrics.cmd_req.inc();
+                            metrics.cmd_req.inc();
                             if let Some(ref lim) = sub_lim_opt {
                                 lim.until_ready_with_jitter(jitter).await;
+                            }
+                            if settings.limits.limit_scrapers && s.is_scraper() {
+                                info!("subscription was scraper, ignoring (cid: {}, sub: {:?})", cid, s.id);
+                                ws_stream.send(Message::Text(format!("[\"EOSE\",\"{}\"]", s.id))).await.ok();
+                                continue
                             }
                             let (abandon_query_tx, abandon_query_rx) = oneshot::channel::<()>();
                             match conn.subscribe(s.clone()) {
@@ -1373,7 +1374,7 @@ async fn nostr_server(
                         // closing a request simply removes the subscription.
                         let parsed : Result<Close> = Result::<Close>::from(cc);
                         if let Ok(c) = parsed {
-                metrics.cmd_close.inc();
+                            metrics.cmd_close.inc();
                             // check if a query is currently
                             // running, and remove it if so.
                             let stop_tx = running_queries.remove(&c.id);

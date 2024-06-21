@@ -156,7 +156,7 @@ impl ClientConn {
         self.auth = Challenge(Uuid::new_v4().to_string());
     }
 
-    pub fn authenticate(&mut self, event: &Event, relay_url: &String) -> Result<()> {
+    pub fn authenticate(&mut self, event: &Event, relay_url: &str) -> Result<()> {
         match &self.auth {
             Challenge(_) => (),
             AuthPubkey(_) => {
@@ -181,15 +181,15 @@ impl ClientConn {
                     return Err(Error::AuthFailure);
                 }
 
-                let mut challenge: Option<&String> = None;
-                let mut relay: Option<&String> = None;
+                let mut challenge: Option<&str> = None;
+                let mut relay: Option<&str> = None;
 
                 for tag in &event.tags {
-                    if tag.len() == 2 && tag.get(0) == Some(&"challenge".into()) {
-                        challenge = tag.get(1);
+                    if tag.len() == 2 && tag.first() == Some(&"challenge".into()) {
+                        challenge = tag.get(1).map(|x| x.as_str());
                     }
-                    if tag.len() == 2 && tag.get(0) == Some(&"relay".into()) {
-                        relay = tag.get(1);
+                    if tag.len() == 2 && tag.first() == Some(&"relay".into()) {
+                        relay = tag.get(1).map(|x| x.as_str());
                     }
                 }
 
@@ -204,7 +204,7 @@ impl ClientConn {
                     }
                 }
 
-                match (relay.and_then(|url| host_str(url)), host_str(relay_url)) {
+                match (relay.and_then(host_str), host_str(relay_url)) {
                     (Some(received_relay), Some(our_relay)) => {
                         if received_relay != our_relay {
                             return Err(Error::AuthFailure);

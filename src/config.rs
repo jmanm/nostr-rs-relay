@@ -1,10 +1,8 @@
 //! Configuration file and settings management
+use crate::payment::Processor;
 use config::{Config, ConfigError, File};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use tracing::warn;
-
-use crate::payment::Processor;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[allow(unused)]
@@ -15,6 +13,7 @@ pub struct Info {
     pub pubkey: Option<String>,
     pub contact: Option<String>,
     pub favicon: Option<String>,
+    pub relay_icon: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,6 +32,7 @@ pub struct Database {
 #[allow(unused)]
 pub struct Grpc {
     pub event_admission_server: Option<String>,
+    pub restricts_write: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,6 +74,7 @@ pub struct Limits {
     pub event_persist_buffer: usize, // events to buffer for database commits (block senders if database writes are too slow)
     pub event_kind_blacklist: Option<Vec<u64>>,
     pub event_kind_allowlist: Option<Vec<u64>>,
+    pub limit_scrapers: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,8 +94,9 @@ pub struct PayToRelay {
     pub node_url: String,
     pub api_secret: String,
     pub terms_message: String,
-    pub sign_ups: bool, // allow new users to sign up to relay
-    pub secret_key: String,
+    pub sign_ups: bool,       // allow new users to sign up to relay
+    pub direct_message: bool, // Send direct message to user with invoice and terms
+    pub secret_key: Option<String>,
     pub processor: Processor,
 }
 
@@ -191,17 +193,23 @@ pub struct Settings {
 }
 
 impl Settings {
-    #[must_use]
-    pub fn new(config_file_name: &Option<String>) -> Self {
+    pub fn new(config_file_name: &Option<String>) -> Result<Self, ConfigError> {
         let default_settings = Self::default();
         // attempt to construct settings with file
         let from_file = Self::new_from_default(&default_settings, config_file_name);
         match from_file {
-            Ok(f) => f,
             Err(e) => {
-                warn!("Error reading config file ({:?})", e);
-                default_settings
+                // pass up the parse error if the config file was specified,
+                // otherwise use the default config (with a warning).
+                if config_file_name.is_some() {
+                    Err(e)
+                } else {
+                    eprintln!("Error reading config file ({:?})", e);
+                    eprintln!("WARNING: Default configuration settings will be used");
+                    Ok(default_settings)
+                }
             }
+            ok => ok,
         }
     }
 
@@ -243,7 +251,14 @@ impl Settings {
             // Should check that url is valid
             assert_ne!(settings.pay_to_relay.node_url, "");
             assert_ne!(settings.pay_to_relay.terms_message, "");
-            assert_ne!(settings.pay_to_relay.secret_key, "");
+
+            if settings.pay_to_relay.direct_message {
+                assert_ne!(
+                    settings.pay_to_relay.secret_key,
+                    Some("<nostr nsec>".to_string())
+                );
+                assert!(settings.pay_to_relay.secret_key.is_some());
+            }
         }
 
         Ok(settings)
@@ -260,6 +275,7 @@ impl Default for Settings {
                 pubkey: None,
                 contact: None,
                 favicon: None,
+                relay_icon: None,
             },
             diagnostics: Diagnostics { tracing: false },
             database: Database {
@@ -273,6 +289,7 @@ impl Default for Settings {
             },
             grpc: Grpc {
                 event_admission_server: None,
+                restricts_write: false,
             },
             network: Network {
                 port: 8080,
@@ -292,6 +309,7 @@ impl Default for Settings {
                 event_persist_buffer: 4096,
                 event_kind_blacklist: None,
                 event_kind_allowlist: None,
+                limit_scrapers: false
             },
             authorization: Authorization {
                 pubkey_whitelist: None, // Allow any address to publish
@@ -306,7 +324,8 @@ impl Default for Settings {
                 node_url: "".to_string(),
                 api_secret: "".to_string(),
                 sign_ups: false,
-                secret_key: "".to_string(),
+                direct_message: false,
+                secret_key: None,
                 processor: Processor::LNBits,
             },
             verified_users: VerifiedUsers {

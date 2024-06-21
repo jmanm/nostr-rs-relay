@@ -4,8 +4,6 @@ use crate::config::Settings;
 use crate::db::QueryResult;
 use crate::error::{Error::SqlError, Result};
 use crate::event::{single_char_tagname, Event};
-use crate::hexrange::hex_range;
-use crate::hexrange::HexSearch;
 use crate::nip05::{Nip05Name, VerificationRecord};
 use crate::payment::{InvoiceInfo, InvoiceStatus};
 use crate::repo::sqlite_migration::{upgrade_db, STARTUP_SQL};
@@ -62,7 +60,7 @@ impl SqliteRepo {
             "writer",
             settings,
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
-            1,
+            0,
             2,
             false,
         );
@@ -70,7 +68,7 @@ impl SqliteRepo {
             "maintenance",
             settings,
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
-            1,
+            0,
             2,
             true,
         );
@@ -842,7 +840,8 @@ impl NostrRepo for SqliteRepo {
     async fn update_invoice(&self, payment_hash: &str, status: InvoiceStatus) -> Result<String> {
         let mut conn = self.write_pool.get()?;
         let payment_hash = payment_hash.to_owned();
-        let pub_key = tokio::task::spawn_blocking(move || {
+
+        tokio::task::spawn_blocking(move || {
             let tx = conn.transaction()?;
             let pubkey: String;
             {
@@ -884,8 +883,7 @@ impl NostrRepo for SqliteRepo {
             let ok: Result<String> = Ok(pubkey);
             ok
         })
-        .await?;
-        pub_key
+        .await?
     }
 
     /// Get the most recent invoice for a given pubkey
@@ -978,7 +976,7 @@ fn query_from_filter(f: &ReqFilter) -> (String, Vec<Box<dyn ToSql>>, Option<Stri
         return (empty_query, empty_params, None);
     }
 
-    // check if the index needs to be overriden
+    // check if the index needs to be overridden
     let idx_name = override_index(f);
     let idx_stmt = idx_name
         .as_ref()
@@ -994,24 +992,9 @@ fn query_from_filter(f: &ReqFilter) -> (String, Vec<Box<dyn ToSql>>, Option<Stri
         // take each author and convert to a hexsearch
         let mut auth_searches: Vec<String> = vec![];
         for auth in authvec {
-            match hex_range(auth) {
-                Some(HexSearch::Exact(ex)) => {
-                    auth_searches.push("author=?".to_owned());
-                    params.push(Box::new(ex));
-                }
-                Some(HexSearch::Range(lower, upper)) => {
-                    auth_searches.push("(author>? AND author<?)".to_owned());
-                    params.push(Box::new(lower));
-                    params.push(Box::new(upper));
-                }
-                Some(HexSearch::LowerOnly(lower)) => {
-                    auth_searches.push("author>?".to_owned());
-                    params.push(Box::new(lower));
-                }
-                None => {
-                    info!("Could not parse hex range from author {:?}", auth);
-                }
-            }
+            auth_searches.push("author=?".to_owned());
+            let auth_bin = hex::decode(auth).ok();
+            params.push(Box::new(auth_bin));
         }
         if !authvec.is_empty() {
             let auth_clause = format!("({})", auth_searches.join(" OR "));
@@ -1032,24 +1015,8 @@ fn query_from_filter(f: &ReqFilter) -> (String, Vec<Box<dyn ToSql>>, Option<Stri
         // take each author and convert to a hexsearch
         let mut id_searches: Vec<String> = vec![];
         for id in idvec {
-            match hex_range(id) {
-                Some(HexSearch::Exact(ex)) => {
-                    id_searches.push("event_hash=?".to_owned());
-                    params.push(Box::new(ex));
-                }
-                Some(HexSearch::Range(lower, upper)) => {
-                    id_searches.push("(event_hash>? AND event_hash<?)".to_owned());
-                    params.push(Box::new(lower));
-                    params.push(Box::new(upper));
-                }
-                Some(HexSearch::LowerOnly(lower)) => {
-                    id_searches.push("event_hash>?".to_owned());
-                    params.push(Box::new(lower));
-                }
-                None => {
-                    info!("Could not parse hex range from id {:?}", id);
-                }
-            }
+            id_searches.push("event_hash=?".to_owned());
+            params.push(Box::new(id.clone()));
         }
         if idvec.is_empty() {
             // if the ids list was empty, we should never return
@@ -1072,26 +1039,24 @@ fn query_from_filter(f: &ReqFilter) -> (String, Vec<Box<dyn ToSql>>, Option<Stri
             // find evidence of the target tag name/value existing for this event.
             // Query for Kind/Since/Until additionally, to reduce the number of tags that come back.
             let kind_clause;
-            let since_clause;
-            let until_clause;
             if let Some(ks) = &f.kinds {
                 // kind is number, no escaping needed
                 let str_kinds: Vec<String> =
                     ks.iter().map(std::string::ToString::to_string).collect();
                 kind_clause = format!("AND kind IN ({})", str_kinds.join(", "));
             } else {
-                kind_clause = format!("");
+                kind_clause = String::new();
             };
-            if f.since.is_some() {
-                since_clause = format!("AND created_at > {}", f.since.unwrap());
+            let since_clause = if f.since.is_some() {
+                format!("AND created_at >= {}", f.since.unwrap())
             } else {
-                since_clause = format!("");
+                String::new()
             };
             // Query for timestamp
-            if f.until.is_some() {
-                until_clause = format!("AND created_at < {}", f.until.unwrap());
+            let until_clause = if f.until.is_some() {
+                format!("AND created_at <= {}", f.until.unwrap())
             } else {
-                until_clause = format!("");
+                String::new()
             };
 
             let tag_clause = format!(
@@ -1107,12 +1072,12 @@ fn query_from_filter(f: &ReqFilter) -> (String, Vec<Box<dyn ToSql>>, Option<Stri
     }
     // Query for timestamp
     if f.since.is_some() {
-        let created_clause = format!("created_at > {}", f.since.unwrap());
+        let created_clause = format!("created_at >= {}", f.since.unwrap());
         filter_components.push(created_clause);
     }
     // Query for timestamp
     if f.until.is_some() {
-        let until_clause = format!("created_at < {}", f.until.unwrap());
+        let until_clause = format!("created_at <= {}", f.until.unwrap());
         filter_components.push(until_clause);
     }
     // never display hidden events
@@ -1199,9 +1164,15 @@ pub fn build_pool(
         .test_on_check_out(true) // no noticeable performance hit
         .min_idle(Some(min_size))
         .max_size(max_size)
+        .idle_timeout(Some(Duration::from_secs(10)))
         .max_lifetime(Some(Duration::from_secs(30)))
         .build(manager)
         .unwrap();
+    // retrieve a connection to ensure the startup statements run immediately
+    {
+        let _ = pool.get();
+    }
+
     info!(
         "Built a connection pool {:?} (min={}, max={})",
         name, min_size, max_size
@@ -1311,6 +1282,7 @@ pub async fn db_checkpoint_task(
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 enum SqliteStatus {
     Ok,
     Busy,

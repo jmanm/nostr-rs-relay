@@ -1,6 +1,6 @@
 [package]
 name = "nostr-rs-relay"
-version = "0.8.9"
+version = "0.8.13"
 edition = "2021"
 authors = ["Greg Heartsfield <scsibug@imap.cc>"]
 description = "A relay implementation for the Nostr protocol"
@@ -39,7 +39,7 @@ lazy_static = "1.4"
 governor = "0.4"
 nonzero_ext = "0.3"
 hyper = { version="0.14", features=["client", "server","http1","http2","tcp"] }
-hyper-tls = "0.5"
+hyper-rustls = { version = "0.24" }
 http = { version = "0.2" }
 parse_duration = "2"
 rand = "0.8"
@@ -57,6 +57,7 @@ qrcode = { version = "0.12.0", default-features = false, features = ["svg"] }
 nostr = { version = "0.18.0", default-features = false, features = ["base", "nip04", "nip19"] }
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = "0.5"
+log = "0.4"
 
 [dev-dependencies]
 anyhow = "1"

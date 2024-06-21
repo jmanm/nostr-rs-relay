@@ -14,15 +14,13 @@ use sqlx::{Error, Execute, FromRow, Postgres, QueryBuilder, Row};
 use std::time::{Duration, Instant};
 
 use crate::error;
-use crate::hexrange::{hex_range, HexSearch};
 use crate::repo::postgres_migration::run_migrations;
 use crate::server::NostrMetrics;
 use crate::utils::{self, is_hex, is_lower_hex};
 use nostr::key::Keys;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot::Receiver;
-use tracing::log::trace;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 pub type PostgresPool = sqlx::pool::Pool<Postgres>;
 
@@ -189,8 +187,7 @@ ON CONFLICT (id) DO NOTHING"#,
                                 .bind(tag_name)
                                 .bind(hex::decode(tag_val).ok())
                                 .execute(&mut tx)
-                                .await
-                                .unwrap();
+                                .await?;
                         } else {
                             sqlx::query("INSERT INTO tag (event_id, \"name\", value, value_hex) VALUES($1, $2, $3, NULL) \
                     ON CONFLICT (event_id, \"name\", value, value_hex) DO NOTHING")
@@ -198,8 +195,7 @@ ON CONFLICT (id) DO NOTHING"#,
                                 .bind(tag_name)
                                 .bind(tag_val.as_bytes())
                                 .execute(&mut tx)
-                                .await
-                                .unwrap();
+                                .await?;
                         }
                     }
                     None => {}
@@ -638,14 +634,14 @@ ON CONFLICT (id) DO NOTHING"#,
         sqlx::query(
             "INSERT INTO invoice (pubkey, payment_hash, amount, status, description, created_at, invoice) VALUES ($1, $2, $3, $4, $5, now(), $6)",
         )
-        .bind(pub_key)
-        .bind(invoice_info.payment_hash)
-        .bind(invoice_info.amount as i64)
-        .bind(invoice_info.status)
-        .bind(invoice_info.memo)
-        .bind(invoice_info.bolt11)
-        .execute(&mut tx)
-        .await.unwrap();
+            .bind(pub_key)
+            .bind(invoice_info.payment_hash)
+            .bind(invoice_info.amount as i64)
+            .bind(invoice_info.status)
+            .bind(invoice_info.memo)
+            .bind(invoice_info.bolt11)
+            .execute(&mut tx)
+            .await.unwrap();
 
         debug!("Invoice added");
 
@@ -734,140 +730,62 @@ fn query_from_filter(f: &ReqFilter) -> Option<QueryBuilder<Postgres>> {
         // filter out non-hex values
         let auth_vec: Vec<&String> = auth_vec.iter().filter(|a| is_hex(a)).collect();
 
-        if !auth_vec.is_empty() {
-            query.push("(");
-
-            // shortcut authors into "IN" query
-            let any_is_range = auth_vec.iter().any(|pk| pk.len() != 64);
-            if !any_is_range {
-                query.push("e.pub_key in (");
-                let mut pk_sep = query.separated(", ");
-                for pk in auth_vec.iter() {
-                    pk_sep.push_bind(hex::decode(pk).ok());
-                }
-                query.push(") OR e.delegated_by in (");
-                let mut pk_delegated_sep = query.separated(", ");
-                for pk in auth_vec.iter() {
-                    pk_delegated_sep.push_bind(hex::decode(pk).ok());
-                }
-                query.push(")");
-                push_and = true;
-            } else {
-                let mut range_authors = query.separated(" OR ");
-                for auth in auth_vec {
-                    match hex_range(auth) {
-                        Some(HexSearch::Exact(ex)) => {
-                            range_authors
-                                .push("(e.pub_key = ")
-                                .push_bind_unseparated(ex.clone())
-                                .push_unseparated(" OR e.delegated_by = ")
-                                .push_bind_unseparated(ex)
-                                .push_unseparated(")");
-                        }
-                        Some(HexSearch::Range(lower, upper)) => {
-                            range_authors
-                                .push("((e.pub_key > ")
-                                .push_bind_unseparated(lower.clone())
-                                .push_unseparated(" AND e.pub_key < ")
-                                .push_bind_unseparated(upper.clone())
-                                .push_unseparated(") OR (e.delegated_by > ")
-                                .push_bind_unseparated(lower)
-                                .push_unseparated(" AND e.delegated_by < ")
-                                .push_bind_unseparated(upper)
-                                .push_unseparated("))");
-                        }
-                        Some(HexSearch::LowerOnly(lower)) => {
-                            range_authors
-                                .push("(e.pub_key > ")
-                                .push_bind_unseparated(lower.clone())
-                                .push_unseparated(" OR e.delegated_by > ")
-                                .push_bind_unseparated(lower)
-                                .push_unseparated(")");
-                        }
-                        None => {
-                            info!("Could not parse hex range from author {:?}", auth);
-                        }
-                    }
-                    push_and = true;
-                }
-            }
-            query.push(")");
+        if auth_vec.is_empty() {
+            return None;
         }
+        query.push("(e.pub_key in (");
+
+        let mut pk_sep = query.separated(", ");
+        for pk in auth_vec.iter() {
+            pk_sep.push_bind(hex::decode(pk).ok());
+        }
+        query.push(") OR e.delegated_by in (");
+        let mut pk_delegated_sep = query.separated(", ");
+        for pk in auth_vec.iter() {
+            pk_delegated_sep.push_bind(hex::decode(pk).ok());
+        }
+        push_and = true;
+        query.push("))");
     }
 
     // Query for Kind
     if let Some(ks) = &f.kinds {
-        if !ks.is_empty() {
-            if push_and {
-                query.push(" AND ");
-            }
-            push_and = true;
-
-            query.push("e.kind in (");
-            let mut list_query = query.separated(", ");
-            for k in ks.iter() {
-                list_query.push_bind(*k as i64);
-            }
-            query.push(")");
+        if ks.is_empty() {
+            return None;
         }
+        if push_and {
+            query.push(" AND ");
+        }
+        push_and = true;
+
+        query.push("e.kind in (");
+        let mut list_query = query.separated(", ");
+        for k in ks.iter() {
+            list_query.push_bind(*k as i64);
+        }
+        query.push(")");
     }
 
-    // Query for event, allowing prefix matches
+    // Query for event,
     if let Some(id_vec) = &f.ids {
         // filter out non-hex values
         let id_vec: Vec<&String> = id_vec.iter().filter(|a| is_hex(a)).collect();
-
-        if !id_vec.is_empty() {
-            if push_and {
-                query.push(" AND (");
-            } else {
-                query.push("(");
-            }
-            push_and = true;
-
-            // shortcut ids into "IN" query
-            let any_is_range = id_vec.iter().any(|pk| pk.len() != 64);
-            if !any_is_range {
-                query.push("id in (");
-                let mut sep = query.separated(", ");
-                for id in id_vec.iter() {
-                    sep.push_bind(hex::decode(id).ok());
-                }
-                query.push(")");
-            } else {
-                // take each author and convert to a hex search
-                let mut id_query = query.separated(" OR ");
-                for id in id_vec {
-                    match hex_range(id) {
-                        Some(HexSearch::Exact(ex)) => {
-                            id_query
-                                .push("(id = ")
-                                .push_bind_unseparated(ex)
-                                .push_unseparated(")");
-                        }
-                        Some(HexSearch::Range(lower, upper)) => {
-                            id_query
-                                .push("(id > ")
-                                .push_bind_unseparated(lower)
-                                .push_unseparated(" AND id < ")
-                                .push_bind_unseparated(upper)
-                                .push_unseparated(")");
-                        }
-                        Some(HexSearch::LowerOnly(lower)) => {
-                            id_query
-                                .push("(id > ")
-                                .push_bind_unseparated(lower)
-                                .push_unseparated(")");
-                        }
-                        None => {
-                            info!("Could not parse hex range from id {:?}", id);
-                        }
-                    }
-                }
-            }
-
-            query.push(")");
+        if id_vec.is_empty() {
+            return None;
         }
+        if push_and {
+            query.push(" AND (");
+        } else {
+            query.push("(");
+        }
+        push_and = true;
+
+        query.push("id in (");
+        let mut sep = query.separated(", ");
+        for id in id_vec.iter() {
+            sep.push_bind(hex::decode(id).ok());
+        }
+        query.push("))");
     }
 
     // Query for tags
@@ -878,22 +796,46 @@ fn query_from_filter(f: &ReqFilter) -> Option<QueryBuilder<Postgres>> {
             }
             push_and = true;
 
+            let mut push_or = false;
+            query.push("e.id IN (SELECT ee.id FROM \"event\" ee LEFT JOIN tag t on ee.id = t.event_id WHERE ee.hidden != 1::bit(1) and ");
             for (key, val) in map.iter() {
-                query.push("e.id IN (SELECT ee.id FROM \"event\" ee LEFT JOIN tag t on ee.id = t.event_id WHERE ee.hidden != 1::bit(1) and (t.\"name\" = ")
+                if val.is_empty() {
+                    return None;
+                }
+                if push_or {
+                    query.push(" OR ");
+                }
+                query
+                    .push("(t.\"name\" = ")
                     .push_bind(key.to_string())
-                    .push(" AND (value in (");
+                    .push(" AND (");
 
-                // plain value match first
-                let mut tag_query = query.separated(", ");
-                for v in val.iter() {
-                    if (v.len() % 2 != 0) && !is_lower_hex(v) {
+                let has_plain_values = val.iter().any(|v| (v.len() % 2 != 0 || !is_lower_hex(v)));
+                let has_hex_values = val.iter().any(|v| v.len() % 2 == 0 && is_lower_hex(v));
+                if has_plain_values {
+                    query.push("value in (");
+                    // plain value match first
+                    let mut tag_query = query.separated(", ");
+                    for v in val.iter().filter(|v| v.len() % 2 != 0 || !is_lower_hex(v)) {
                         tag_query.push_bind(v.as_bytes());
-                    } else {
+                    }
+                }
+                if has_plain_values && has_hex_values {
+                    query.push(") OR ");
+                }
+                if has_hex_values {
+                    query.push("value_hex in (");
+                    // plain value match first
+                    let mut tag_query = query.separated(", ");
+                    for v in val.iter().filter(|v| v.len() % 2 == 0 && is_lower_hex(v)) {
                         tag_query.push_bind(hex::decode(v).ok());
                     }
                 }
-                query.push("))))");
+
+                query.push(")))");
+                push_or = true;
             }
+            query.push(")");
         }
     }
 
@@ -904,7 +846,7 @@ fn query_from_filter(f: &ReqFilter) -> Option<QueryBuilder<Postgres>> {
         }
         push_and = true;
         query
-            .push("e.created_at > ")
+            .push("e.created_at >= ")
             .push_bind(Utc.timestamp_opt(f.since.unwrap() as i64, 0).unwrap());
     }
 
@@ -915,7 +857,7 @@ fn query_from_filter(f: &ReqFilter) -> Option<QueryBuilder<Postgres>> {
         }
         push_and = true;
         query
-            .push("e.created_at < ")
+            .push("e.created_at <= ")
             .push_bind(Utc.timestamp_opt(f.until.unwrap() as i64, 0).unwrap());
     }
 
@@ -926,10 +868,7 @@ fn query_from_filter(f: &ReqFilter) -> Option<QueryBuilder<Postgres>> {
         query.push("e.hidden != 1::bit(1)");
     }
     // never display expired events
-    query
-        .push(" AND (e.expires_at IS NULL OR e.expires_at > ")
-        .push_bind(Utc.timestamp_opt(utils::unix_time() as i64, 0).unwrap())
-        .push(")");
+    query.push(" AND (e.expires_at IS NULL OR e.expires_at > now())");
 
     // Apply per-filter limit to this query.
     // The use of a LIMIT implies a DESC order, to capture only the most recent events.
@@ -962,5 +901,113 @@ impl FromRow<'_, PgRow> for VerificationRecord {
             },
             failure_count: row.get::<'_, i32, &str>("fail_count") as u64,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn test_query_gen_tag_value_hex() {
+        let filter = ReqFilter {
+            ids: None,
+            kinds: Some(vec![1000]),
+            since: None,
+            until: None,
+            authors: Some(vec![
+                "84de35e2584d2b144aae823c9ed0b0f3deda09648530b93d1a2a146d1dea9864".to_owned(),
+            ]),
+            limit: None,
+            tags: Some(HashMap::from([(
+                'p',
+                HashSet::from([
+                    "63fe6318dc58583cfe16810f86dd09e18bfd76aabc24a0081ce2856f330504ed".to_owned(),
+                ]),
+            )])),
+            force_no_match: false,
+        };
+
+        let q = query_from_filter(&filter).unwrap();
+        assert_eq!(q.sql(), "SELECT e.\"content\", e.created_at FROM \"event\" e WHERE (e.pub_key in ($1) OR e.delegated_by in ($2)) AND e.kind in ($3) AND e.id IN (SELECT ee.id FROM \"event\" ee LEFT JOIN tag t on ee.id = t.event_id WHERE ee.hidden != 1::bit(1) and (t.\"name\" = $4 AND (value_hex in ($5)))) AND e.hidden != 1::bit(1) AND (e.expires_at IS NULL OR e.expires_at > now()) ORDER BY e.created_at ASC LIMIT 1000")
+    }
+
+    #[test]
+    fn test_query_gen_tag_value() {
+        let filter = ReqFilter {
+            ids: None,
+            kinds: Some(vec![1000]),
+            since: None,
+            until: None,
+            authors: Some(vec![
+                "84de35e2584d2b144aae823c9ed0b0f3deda09648530b93d1a2a146d1dea9864".to_owned(),
+            ]),
+            limit: None,
+            tags: Some(HashMap::from([('d', HashSet::from(["test".to_owned()]))])),
+            force_no_match: false,
+        };
+
+        let q = query_from_filter(&filter).unwrap();
+        assert_eq!(q.sql(), "SELECT e.\"content\", e.created_at FROM \"event\" e WHERE (e.pub_key in ($1) OR e.delegated_by in ($2)) AND e.kind in ($3) AND e.id IN (SELECT ee.id FROM \"event\" ee LEFT JOIN tag t on ee.id = t.event_id WHERE ee.hidden != 1::bit(1) and (t.\"name\" = $4 AND (value in ($5)))) AND e.hidden != 1::bit(1) AND (e.expires_at IS NULL OR e.expires_at > now()) ORDER BY e.created_at ASC LIMIT 1000")
+    }
+
+    #[test]
+    fn test_query_gen_tag_value_and_value_hex() {
+        let filter = ReqFilter {
+            ids: None,
+            kinds: Some(vec![1000]),
+            since: None,
+            until: None,
+            authors: Some(vec![
+                "84de35e2584d2b144aae823c9ed0b0f3deda09648530b93d1a2a146d1dea9864".to_owned(),
+            ]),
+            limit: None,
+            tags: Some(HashMap::from([(
+                'd',
+                HashSet::from([
+                    "test".to_owned(),
+                    "63fe6318dc58583cfe16810f86dd09e18bfd76aabc24a0081ce2856f330504ed".to_owned(),
+                ]),
+            )])),
+            force_no_match: false,
+        };
+
+        let q = query_from_filter(&filter).unwrap();
+        assert_eq!(q.sql(), "SELECT e.\"content\", e.created_at FROM \"event\" e WHERE (e.pub_key in ($1) OR e.delegated_by in ($2)) AND e.kind in ($3) AND e.id IN (SELECT ee.id FROM \"event\" ee LEFT JOIN tag t on ee.id = t.event_id WHERE ee.hidden != 1::bit(1) and (t.\"name\" = $4 AND (value in ($5) OR value_hex in ($6)))) AND e.hidden != 1::bit(1) AND (e.expires_at IS NULL OR e.expires_at > now()) ORDER BY e.created_at ASC LIMIT 1000")
+    }
+
+    #[test]
+    fn test_query_multiple_tags() {
+        let filter = ReqFilter {
+            ids: None,
+            kinds: Some(vec![30_001]),
+            since: None,
+            until: None,
+            authors: None,
+            limit: None,
+            tags: Some(HashMap::from([
+                ('d', HashSet::from(["follow".to_owned()])),
+                ('t', HashSet::from(["siamstr".to_owned()])),
+            ])),
+            force_no_match: false,
+        };
+        let q = query_from_filter(&filter).unwrap();
+        assert_eq!(q.sql(), "SELECT e.\"content\", e.created_at FROM \"event\" e WHERE e.kind in ($1) AND e.id IN (SELECT ee.id FROM \"event\" ee LEFT JOIN tag t on ee.id = t.event_id WHERE ee.hidden != 1::bit(1) and (t.\"name\" = $2 AND (value in ($3))) OR (t.\"name\" = $4 AND (value in ($5)))) AND e.hidden != 1::bit(1) AND (e.expires_at IS NULL OR e.expires_at > now()) ORDER BY e.created_at ASC LIMIT 1000")
+    }
+
+    #[test]
+    fn test_query_empty_tags() {
+        let filter = ReqFilter {
+            ids: None,
+            kinds: Some(vec![1, 6, 16, 30023, 1063, 6969]),
+            since: Some(1700697846),
+            until: None,
+            authors: None,
+            limit: None,
+            tags: Some(HashMap::from([('a', HashSet::new())])),
+            force_no_match: false,
+        };
+        assert!(query_from_filter(&filter).is_none());
     }
 }

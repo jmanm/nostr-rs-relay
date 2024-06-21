@@ -49,7 +49,7 @@ The examples below start a rootless podman container, mapping a local
 data directory and config file.
 
 ```console
-$ podman build -t nostr-rs-relay .
+$ podman build --pull -t nostr-rs-relay .
 
 $ mkdir data
 
@@ -92,6 +92,11 @@ https://hub.docker.com/r/scsibug/nostr-rs-relay
 ## Build and Run (without Docker)
 
 Building `nostr-rs-relay` requires an installation of Cargo & Rust: https://www.rust-lang.org/tools/install
+
+The following OS packages will be helpful; on Debian/Ubuntu:
+```console
+$ sudo apt-get install build-essential cmake protobuf-compiler pkg-config libssl-dev
+```
 
 Clone this repository, and then build a release version of the relay:
 

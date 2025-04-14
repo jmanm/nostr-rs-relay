@@ -4,3 +4,5 @@ nostr.db-*
 justfile
 result
 public/
+config.local.toml
+.DS_Store

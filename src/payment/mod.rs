@@ -3,12 +3,13 @@ use crate::event::Event;
 use crate::payment::cln_rest::ClnRestPaymentProcessor;
 use crate::payment::lnbits::LNBitsPaymentProcessor;
 use crate::repo::NostrRepo;
+use nostr::key::PublicKey;
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 use std::sync::Arc;
 use tracing::{info, warn};
 
 use async_trait::async_trait;
-use nostr::key::{FromPkStr, FromSkStr};
 use nostr::{key::Keys, Event as NostrEvent, EventBuilder};
 
 pub mod cln_rest;
@@ -35,7 +36,7 @@ pub struct Payment {
 #[async_trait]
 pub trait PaymentProcessor: Send + Sync {
     /// Get invoice from processor
-    async fn get_invoice(&self, keys: &Keys, amount: u64) -> Result<InvoiceInfo, Error>;
+    async fn get_invoice(&self, keys: &PublicKey, amount: u64) -> Result<InvoiceInfo, Error>;
     /// Check payment status of an invoice
     async fn check_invoice(&self, payment_hash: &str) -> Result<InvoiceStatus, Error>;
 }
@@ -106,7 +107,7 @@ impl Payment {
 
         // Create nostr key from sk string
         let nostr_keys = if let Some(secret_key) = &settings.pay_to_relay.secret_key {
-            Some(Keys::from_sk_str(secret_key)?)
+            Some(Keys::parse(secret_key)?)
         } else {
             None
         };
@@ -154,7 +155,7 @@ impl Payment {
                     // Gets the most recent unpaid invoice from database
                     // Checks LNbits to verify if paid/unpaid
                     Ok(PaymentMessage::CheckAccount(pubkey)) => {
-                        let keys = Keys::from_pk_str(&pubkey)?;
+                        let keys = PublicKey::from_str(&pubkey)?;
 
                         if let Ok(Some(invoice_info)) = self.repo.get_unpaid_invoice(&keys).await {
                             match self.check_invoice_status(&invoice_info.payment_hash).await? {
@@ -178,7 +179,7 @@ impl Payment {
                                 .update_invoice(&payment_hash, InvoiceStatus::Paid)
                                 .await?;
 
-                            let key = Keys::from_pk_str(&pubkey)?;
+                            let key = PublicKey::from_str(&pubkey)?;
                             self.repo.admit_account(&key, self.settings.pay_to_relay.admission_cost).await?;
                         }
                     }
@@ -207,9 +208,7 @@ impl Payment {
         };
 
         // Create Nostr key from pk
-        let key = Keys::from_pk_str(pubkey)?;
-
-        let pubkey = key.public_key();
+        let pubkey = PublicKey::from_str(pubkey)?;
 
         // Event DM with terms of service
         let message_event: NostrEvent = EventBuilder::new_encrypted_direct_msg(
@@ -243,14 +242,14 @@ impl Payment {
         // This avoids recreating admission invoices
         // I think it will continue to send DMs with the invoice
         // If client continues to try and write to the relay (will be same invoice)
-        let key = Keys::from_pk_str(pubkey)?;
+        let key = PublicKey::from_str(pubkey)?;
         if !self.repo.create_account(&key).await? {
             if let Ok(Some(invoice_info)) = self.repo.get_unpaid_invoice(&key).await {
                 return Ok(invoice_info);
             }
         }
 
-        let key = Keys::from_pk_str(pubkey)?;
+        let key = PublicKey::from_str(pubkey)?;
 
         let invoice_info = self.processor.get_invoice(&key, amount).await?;
 

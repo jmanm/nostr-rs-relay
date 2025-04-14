@@ -18,7 +18,7 @@ use crate::error;
 use crate::repo::postgres_migration::run_migrations;
 use crate::server::NostrMetrics;
 use crate::utils::{self, is_hex, is_lower_hex};
-use nostr::key::Keys;
+use nostr::key::PublicKey;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot::Receiver;
 use tracing::{debug, error, info, trace, warn};
@@ -548,8 +548,8 @@ ON CONFLICT (id) DO NOTHING"#,
             .ok_or(error::Error::SqlxError(RowNotFound))
     }
 
-    async fn create_account(&self, pub_key: &Keys) -> Result<bool> {
-        let pub_key = pub_key.public_key().to_string();
+    async fn create_account(&self, pub_key: &PublicKey) -> Result<bool> {
+        let pub_key = pub_key.to_string();
         let mut tx = self.conn_write.begin().await?;
 
         let result = sqlx::query("INSERT INTO account (pubkey, balance) VALUES ($1, 0);")
@@ -569,8 +569,8 @@ ON CONFLICT (id) DO NOTHING"#,
     }
 
     /// Admit account
-    async fn admit_account(&self, pub_key: &Keys, admission_cost: u64) -> Result<()> {
-        let pub_key = pub_key.public_key().to_string();
+    async fn admit_account(&self, pub_key: &PublicKey, admission_cost: u64) -> Result<()> {
+        let pub_key = pub_key.to_string();
         sqlx::query(
             "UPDATE account SET is_admitted = TRUE, balance = balance - $1 WHERE pubkey = $2",
         )
@@ -582,8 +582,8 @@ ON CONFLICT (id) DO NOTHING"#,
     }
 
     /// Gets if the account is admitted and balance
-    async fn get_account_balance(&self, pub_key: &Keys) -> Result<(bool, u64)> {
-        let pub_key = pub_key.public_key().to_string();
+    async fn get_account_balance(&self, pub_key: &PublicKey) -> Result<(bool, u64)> {
+        let pub_key = pub_key.to_string();
         let query = r#"SELECT
             is_admitted,
             balance
@@ -603,11 +603,11 @@ ON CONFLICT (id) DO NOTHING"#,
     /// Update account balance
     async fn update_account_balance(
         &self,
-        pub_key: &Keys,
+        pub_key: &PublicKey,
         positive: bool,
         new_balance: u64,
     ) -> Result<()> {
-        let pub_key = pub_key.public_key().to_string();
+        let pub_key = pub_key.to_string();
         match positive {
             true => {
                 sqlx::query("UPDATE account SET balance = balance + $1 WHERE pubkey = $2")
@@ -628,8 +628,8 @@ ON CONFLICT (id) DO NOTHING"#,
     }
 
     /// Create invoice record
-    async fn create_invoice_record(&self, pub_key: &Keys, invoice_info: InvoiceInfo) -> Result<()> {
-        let pub_key = pub_key.public_key().to_string();
+    async fn create_invoice_record(&self, pub_key: &PublicKey, invoice_info: InvoiceInfo) -> Result<()> {
+        let pub_key = pub_key.to_string();
         let mut tx = self.conn_write.begin().await?;
 
         sqlx::query(
@@ -687,7 +687,7 @@ ON CONFLICT (id) DO NOTHING"#,
 
     /// Get the most recent invoice for a given pubkey
     /// invoice must be unpaid and not expired
-    async fn get_unpaid_invoice(&self, pubkey: &Keys) -> Result<Option<InvoiceInfo>> {
+    async fn get_unpaid_invoice(&self, pubkey: &PublicKey) -> Result<Option<InvoiceInfo>> {
         let query = r#"
 SELECT amount, payment_hash, description, invoice
 FROM invoice
@@ -696,13 +696,13 @@ ORDER BY created_at DESC
 LIMIT 1;
         "#;
         match sqlx::query_as::<_, (i64, String, String, String)>(query)
-            .bind(pubkey.public_key().to_string())
+            .bind(pubkey.to_string())
             .fetch_optional(&self.conn_write)
             .await
             .unwrap()
         {
             Some((amount, payment_hash, description, invoice)) => Ok(Some(InvoiceInfo {
-                pubkey: pubkey.public_key().to_string(),
+                pubkey: pubkey.to_string(),
                 payment_hash,
                 bolt11: invoice,
                 amount: amount as u64,

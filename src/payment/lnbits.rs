@@ -3,7 +3,7 @@ use http::Uri;
 use hyper::client::connect::HttpConnector;
 use hyper::Client;
 use hyper_rustls::HttpsConnector;
-use nostr::Keys;
+use nostr::PublicKey;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -89,9 +89,9 @@ impl LNBitsPaymentProcessor {
 #[async_trait]
 impl PaymentProcessor for LNBitsPaymentProcessor {
     /// Calls LNBits api to ger new invoice
-    async fn get_invoice(&self, key: &Keys, amount: u64) -> Result<InvoiceInfo, Error> {
+    async fn get_invoice(&self, key: &PublicKey, amount: u64) -> Result<InvoiceInfo, Error> {
         let random_number: u16 = rand::thread_rng().gen();
-        let memo = format!("{}: {}", random_number, key.public_key());
+        let memo = format!("{}: {}", random_number, key);
 
         let callback_url = Url::parse(
             &self
@@ -130,7 +130,7 @@ impl PaymentProcessor for LNBitsPaymentProcessor {
         let invoice_response: LNBitsCreateInvoiceResponse = serde_json::from_slice(&body)?;
 
         Ok(InvoiceInfo {
-            pubkey: key.public_key().to_string(),
+            pubkey: key.to_string(),
             payment_hash: invoice_response.payment_hash,
             bolt11: invoice_response.payment_request,
             amount,

@@ -12,7 +12,7 @@ use config::ConfigError;
 use http::{header::CONTENT_TYPE, HeaderValue, Uri};
 use hyper::{client::HttpConnector, Client};
 use hyper_rustls::HttpsConnector;
-use nostr::Keys;
+use nostr::PublicKey;
 use rand::random;
 
 use crate::{
@@ -59,9 +59,9 @@ impl ClnRestPaymentProcessor {
 
 #[async_trait]
 impl PaymentProcessor for ClnRestPaymentProcessor {
-    async fn get_invoice(&self, key: &Keys, amount: u64) -> Result<InvoiceInfo, Error> {
+    async fn get_invoice(&self, key: &PublicKey, amount: u64) -> Result<InvoiceInfo, Error> {
         let random_number: u16 = random();
-        let memo = format!("{}: {}", random_number, key.public_key());
+        let memo = format!("{}: {}", random_number, key);
 
         let body = InvoiceRequest {
             cltv: None,
@@ -94,7 +94,7 @@ impl PaymentProcessor for ClnRestPaymentProcessor {
         let invoice_response: InvoiceResponse = serde_json::from_slice(&body)?;
 
         Ok(InvoiceInfo {
-            pubkey: key.public_key().to_string(),
+            pubkey: key.to_string(),
             payment_hash: invoice_response.payment_hash.to_string(),
             bolt11: invoice_response.bolt11,
             amount,

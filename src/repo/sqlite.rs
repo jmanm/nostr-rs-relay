@@ -13,6 +13,7 @@ use crate::subscription::{ReqFilter, Subscription};
 use crate::utils::{is_hex, unix_time};
 use async_trait::async_trait;
 use hex;
+use nostr::key::PublicKey;
 use r2d2;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::params;
@@ -29,7 +30,6 @@ use tokio::task;
 use tracing::{debug, info, trace, warn};
 
 use crate::repo::{now_jitter, NostrRepo};
-use nostr::key::Keys;
 
 pub type SqlitePool = r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>;
 pub type PooledConnection = r2d2::PooledConnection<r2d2_sqlite::SqliteConnectionManager>;
@@ -726,8 +726,8 @@ impl NostrRepo for SqliteRepo {
     }
 
     /// Create account
-    async fn create_account(&self, pub_key: &Keys) -> Result<bool> {
-        let pub_key = pub_key.public_key().to_string();
+    async fn create_account(&self, pub_key: &PublicKey) -> Result<bool> {
+        let pub_key = pub_key.to_string();
 
         let mut conn = self.write_pool.get()?;
         let ins_count =  tokio::task::spawn_blocking(move || {
@@ -752,10 +752,9 @@ impl NostrRepo for SqliteRepo {
     }
 
     /// Admit account
-    async fn admit_account(&self, pub_key: &Keys, admission_cost: u64) -> Result<()> {
-        let pub_key = pub_key.public_key().to_string();
+    async fn admit_account(&self, pub_key: &PublicKey, admission_cost: u64) -> Result<()> {
+        let pub_key = pub_key.to_string();
         let mut conn = self.write_pool.get()?;
-        let pub_key = pub_key.to_owned();
         tokio::task::spawn_blocking(move || {
             let tx = conn.transaction()?;
             {
@@ -771,10 +770,9 @@ impl NostrRepo for SqliteRepo {
     }
 
     /// Gets if the account is admitted and balance
-    async fn get_account_balance(&self, pub_key: &Keys) -> Result<(bool, u64)> {
-        let pub_key = pub_key.public_key().to_string();
+    async fn get_account_balance(&self, pub_key: &PublicKey) -> Result<(bool, u64)> {
+        let pub_key = pub_key.to_string();
         let mut conn = self.write_pool.get()?;
-        let pub_key = pub_key.to_owned();
         tokio::task::spawn_blocking(move || {
             let tx = conn.transaction()?;
             let query = "SELECT is_admitted, balance FROM account WHERE pubkey = ?1;";
@@ -793,11 +791,11 @@ impl NostrRepo for SqliteRepo {
     /// Update account balance
     async fn update_account_balance(
         &self,
-        pub_key: &Keys,
+        pub_key: &PublicKey,
         positive: bool,
         new_balance: u64,
     ) -> Result<()> {
-        let pub_key = pub_key.public_key().to_string();
+        let pub_key = pub_key.to_string();
 
         let mut conn = self.write_pool.get()?;
         tokio::task::spawn_blocking(move || {
@@ -819,9 +817,8 @@ impl NostrRepo for SqliteRepo {
     }
 
     /// Create invoice record
-    async fn create_invoice_record(&self, pub_key: &Keys, invoice_info: InvoiceInfo) -> Result<()> {
-        let pub_key = pub_key.public_key().to_string();
-        let pub_key = pub_key.to_owned();
+    async fn create_invoice_record(&self, pub_key: &PublicKey, invoice_info: InvoiceInfo) -> Result<()> {
+        let pub_key = pub_key.to_string();
         let mut conn = self.write_pool.get()?;
         tokio::task::spawn_blocking(move || {
             let tx = conn.transaction()?;
@@ -890,11 +887,10 @@ impl NostrRepo for SqliteRepo {
 
     /// Get the most recent invoice for a given pubkey
     /// invoice must be unpaid and not expired
-    async fn get_unpaid_invoice(&self, pubkey: &Keys) -> Result<Option<InvoiceInfo>> {
+    async fn get_unpaid_invoice(&self, pubkey: &PublicKey) -> Result<Option<InvoiceInfo>> {
         let mut conn = self.write_pool.get()?;
 
-        let pubkey = pubkey.to_owned();
-        let pubkey_str = pubkey.clone().public_key().to_string();
+        let pubkey_str = pubkey.to_string();
         let (payment_hash, invoice, amount, description) = tokio::task::spawn_blocking(move || {
             let tx = conn.transaction()?;
 
@@ -918,7 +914,7 @@ LIMIT 1;
         .await??;
 
         Ok(Some(InvoiceInfo {
-            pubkey: pubkey.public_key().to_string(),
+            pubkey: pubkey.to_string(),
             payment_hash,
             bolt11: invoice,
             amount,

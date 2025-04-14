@@ -211,17 +211,17 @@ impl Payment {
         let pubkey = PublicKey::from_str(pubkey)?;
 
         // Event DM with terms of service
-        let message_event: NostrEvent = EventBuilder::new_encrypted_direct_msg(
+        let message_event: NostrEvent = EventBuilder::private_msg(
             nostr_keys,
             pubkey,
             &self.settings.pay_to_relay.terms_message,
-        )?
-        .to_event(nostr_keys)?;
+            vec![],
+        ).await?;
 
         // Event DM with invoice
-        let invoice_event: NostrEvent =
-            EventBuilder::new_encrypted_direct_msg(nostr_keys, pubkey, &invoice_info.bolt11)?
-                .to_event(nostr_keys)?;
+        let invoice_event: NostrEvent = EventBuilder::private_msg(
+          nostr_keys, pubkey, &invoice_info.bolt11, vec![]
+        ).await?;
 
         // Persist DM events to DB
         self.repo.write_event(&message_event.clone().into()).await?;

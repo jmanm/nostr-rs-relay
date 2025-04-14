@@ -30,8 +30,7 @@ use hyper::upgrade::Upgraded;
 use hyper::{
     header, server::conn::AddrStream, upgrade, Body, Request, Response, Server, StatusCode,
 };
-use nostr::key::FromPkStr;
-use nostr::key::Keys;
+use nostr::key::PublicKey;
 use prometheus::IntCounterVec;
 use prometheus::IntGauge;
 use prometheus::{Encoder, Histogram, HistogramOpts, IntCounter, Opts, Registry, TextEncoder};
@@ -46,6 +45,7 @@ use std::io::BufReader;
 use std::io::Read;
 use std::net::SocketAddr;
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::Receiver as MpscReceiver;
 use std::sync::Arc;
@@ -379,7 +379,7 @@ async fn handle_web_request(
 
             // Checks key is valid
             let pubkey = pubkey.unwrap();
-            let key = Keys::from_pk_str(&pubkey);
+            let key = PublicKey::from_str(&pubkey);
             if key.is_err() {
                 return Ok(Response::builder()
                     .status(401)
@@ -574,7 +574,7 @@ async fn handle_web_request(
 
             // Checks key is valid
             let pubkey = pubkey.unwrap();
-            let key = Keys::from_pk_str(&pubkey);
+            let key = PublicKey::from_str(&pubkey);
             if key.is_err() {
                 return Ok(Response::builder()
                     .status(401)

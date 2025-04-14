@@ -12,12 +12,12 @@ use crate::server::NostrMetrics;
 use governor::clock::Clock;
 use governor::{Quota, RateLimiter};
 use log::LevelFilter;
-use nostr::key::FromPkStr;
-use nostr::key::Keys;
+use nostr::key::PublicKey;
 use r2d2;
 use sqlx::pool::PoolOptions;
 use sqlx::postgres::PgConnectOptions;
 use sqlx::ConnectOptions;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -225,7 +225,7 @@ pub async fn db_writer(
             if whitelist.is_none()
                 || (whitelist.is_some() && !whitelist.as_ref().unwrap().contains(&event.pubkey))
             {
-                let key = Keys::from_pk_str(&event.pubkey).unwrap();
+                let key = PublicKey::from_str(&event.pubkey).unwrap();
                 match repo.get_account_balance(&key).await {
                     Ok((user_admitted, balance)) => {
                         // Checks to make sure user is admitted
@@ -441,7 +441,7 @@ pub async fn db_writer(
                 // If the user balance is some, user was not on whitelist
                 // Their balance should be reduced by the cost per event
                 if let Some(_balance) = user_balance {
-                    let pubkey = Keys::from_pk_str(&event.pubkey)?;
+                    let pubkey = PublicKey::from_str(&event.pubkey)?;
                     repo.update_account_balance(&pubkey, false, cost_per_event)
                         .await?;
                 }

@@ -47,7 +47,7 @@ pub struct Event {
     #[serde(skip)]
     pub delegated_by: Option<String>,
     pub created_at: u64,
-    pub kind: u64,
+    pub kind: u16,
     #[serde(deserialize_with = "tag_from_string")]
     // NOTE: array-of-arrays may need to be more general than a string container
     pub tags: Vec<Vec<String>>,
@@ -430,8 +430,8 @@ impl From<nostr::Event> for Event {
             id: nostr_event.id.to_hex(),
             pubkey: nostr_event.pubkey.to_string(),
             created_at: nostr_event.created_at.as_u64(),
-            kind: nostr_event.kind.as_u64(),
-            tags: nostr_event.tags.iter().map(|x| x.as_vec()).collect(),
+            kind: nostr_event.kind.as_u16(),
+            tags: nostr_event.tags.iter().map(|x| x.to_vec()).collect(),
             content: nostr_event.content,
             sig: nostr_event.sig.to_string(),
             delegated_by: None,

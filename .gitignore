@@ -3,7 +3,6 @@ nostr.db
 nostr.db-*
 justfile
 result
-.Ds_Store
-
 public/
 config.local.toml
+.DS_Store

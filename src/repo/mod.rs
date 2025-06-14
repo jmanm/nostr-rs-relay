@@ -88,11 +88,11 @@ pub trait NostrRepo: Send + Sync {
     /// invoice must be unpaid and not expired
     async fn get_unpaid_invoice(&self, pubkey: &PublicKey) -> Result<Option<InvoiceInfo>>;
 
-    async fn get_account_statistics(&self, pubkey: &Keys) -> Result<AccountStatistics>;
+    async fn get_account_statistics(&self, pubkey: &PublicKey) -> Result<AccountStatistics>;
 
     async fn get_all_user_events(
         &self,
-        pubkey: &Keys,
+        pubkey: &PublicKey,
         query_tx: tokio::sync::mpsc::Sender<Vec<Event>>,
         mut cancel_rs: tokio::sync::broadcast::Receiver<()>,
     ) -> Result<()>;

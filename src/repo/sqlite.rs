@@ -924,9 +924,9 @@ LIMIT 1;
         }))
     }
 
-    async fn get_account_statistics(&self, pubkey: &Keys) -> Result<AccountStatistics> {
+    async fn get_account_statistics(&self, pubkey: &PublicKey) -> Result<AccountStatistics> {
         let mut conn = self.read_pool.get()?;
-        let pubkey_str = pubkey.public_key().to_string();
+        let pubkey_str = pubkey.to_string();
         tokio::task::spawn_blocking(move || {
             let tx = conn.transaction()?;
             let query = r"
@@ -955,7 +955,7 @@ GROUP BY kind
 
     async fn get_all_user_events(
         &self,
-        pubkey: &Keys,
+        pubkey: &PublicKey,
         query_tx: tokio::sync::mpsc::Sender<Vec<Event>>,
         mut cancel_rx: tokio::sync::broadcast::Receiver<()>,
     ) -> Result<()> {
@@ -971,7 +971,7 @@ GROUP BY kind
             .unwrap();
 
         let self = self.clone();
-        let pubkey_str = pubkey.public_key().to_string();
+        let pubkey_str = pubkey.to_string();
         task::spawn_blocking(move || {
             {
                 // if we are waiting on a checkpoint, stop until it is complete

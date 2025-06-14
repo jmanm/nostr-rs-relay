@@ -714,13 +714,13 @@ LIMIT 1;
         }
     }
 
-    async fn get_account_statistics(&self, _pubkey: &Keys) -> Result<AccountStatistics> {
+    async fn get_account_statistics(&self, _pubkey: &PublicKey) -> Result<AccountStatistics> {
         todo!("get_account_statistics() is not implemented for Postgres");
     }
 
     async fn get_all_user_events(
         &self,
-        _pubkey: &Keys,
+        _pubkey: &PublicKey,
         _query_tx: tokio::sync::mpsc::Sender<Vec<Event>>,
         mut _cancel_rx: tokio::sync::broadcast::Receiver<()>,
     ) -> Result<()> {

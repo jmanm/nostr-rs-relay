@@ -4,14 +4,13 @@ use chrono::{Days, Utc};
 use hmac::{Hmac, Mac};
 use http::HeaderValue;
 use jwt::{self, SignWithKey, VerifyWithKey};
-use nostr::Keys;
+use nostr::key::PublicKey;
 use secp256k1::{schnorr, XOnlyPublicKey};
 use sha2::Sha256;
 use std::{collections::BTreeMap, str::FromStr};
 
-pub fn authenticate(key: &Keys, signature: &str) -> bool {
-    let pub_key_str = key.public_key().to_string();
-    let public_key = XOnlyPublicKey::from_str(&pub_key_str).unwrap();
+pub fn authenticate(key: &PublicKey, signature: &str) -> bool {
+    let public_key = XOnlyPublicKey::from_str(&key.to_string()).unwrap();
     if let Ok(sig) = schnorr::Signature::from_str(signature) {
         let data = format!("nostr:permission:{}:allowed", &public_key);
         let digest: sha256::Hash = sha256::Hash::hash(data.as_bytes());

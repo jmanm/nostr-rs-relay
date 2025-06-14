@@ -389,10 +389,10 @@ async fn handle_web_request(
             let form_vals = (form_data.get("pubkey"), form_data.get("signature"));
 
             if let (Some(pub_key), Some(signature)) = form_vals {
-                if let Ok(key) = Keys::from_pk_str(&pub_key) {
+                if let Ok(key) = PublicKey::from_str(&pub_key) {
                     if authenticate(&key, signature) {
                         info!("User {} successfully authenticated", pub_key);
-                        let token = generate_auth_token(&key.public_key().to_string(), &settings);
+                        let token = generate_auth_token(&key.to_string(), &settings);
                         return match repo.get_account_statistics(&key).await {
                             Ok(stats) => {
                                 let mut ctx = Context::new();
@@ -484,7 +484,7 @@ async fn handle_web_request(
 
             // Checks key is valid
             let pubkey = pubkey.unwrap();
-            let key = Keys::from_pk_str(&pubkey);
+            let key = PublicKey::from_str(&pubkey);
             if key.is_err() {
                 return Ok(status_and_text(StatusCode::UNAUTHORIZED, "Looks like your key is invalid"));
             }
@@ -540,7 +540,7 @@ async fn handle_web_request(
 
             // Checks key is valid
             let pubkey = pubkey.unwrap();
-            let key = Keys::from_pk_str(&pubkey);
+            let key = PublicKey::from_str(&pubkey);
             if key.is_err() {
                 return Ok(status_and_text(StatusCode::UNAUTHORIZED, "Looks like your key is invalid"));
             }

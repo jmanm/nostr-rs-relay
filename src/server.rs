@@ -389,10 +389,11 @@ async fn handle_web_request(
             let form_vals = (form_data.get("pubkey"), form_data.get("signature"));
 
             if let (Some(pub_key), Some(signature)) = form_vals {
+                info!("Authorization request from user {}", pub_key);
                 if let Ok(key) = Keys::from_pk_str(&pub_key) {
                     if authenticate(&key, signature) {
                         info!("User {} successfully authenticated", pub_key);
-                        let token = generate_auth_token(&key.public_key().to_string(), &settings);
+                        let token = generate_auth_token(&key, &settings);
                         return match repo.get_account_statistics(&key).await {
                             Ok(stats) => {
                                 let mut ctx = Context::new();
@@ -413,6 +414,7 @@ async fn handle_web_request(
                             }
                         }
                     }
+                    warn!("Received invalid signature from user {}: '{}'", pub_key, signature);
                     return Ok(status_and_text(StatusCode::BAD_REQUEST, "Invalid signature"));
                 }
             }
@@ -453,7 +455,7 @@ async fn handle_web_request(
                     status = "admitted";
                     if let Some(cookie) = request.headers().get("Cookie") {
                         if let Some(token) = get_token_value(cookie) {
-                            if validate_auth_token(token, &settings) {
+                            if validate_auth_token(token, &key, &settings) {
                                 status = "authorized";
                             }
                         }
@@ -500,7 +502,7 @@ async fn handle_web_request(
 
             if let Some(cookie) = request.headers().get("Cookie") {
                 if let Some(token) = get_token_value(cookie) {
-                    if validate_auth_token(token, &settings) {
+                    if validate_auth_token(token, &key, &settings) {
                         return match repo.get_account_statistics(&key).await {
                             Ok(stats) => {
                                 let mut ctx = Context::new();
@@ -556,7 +558,8 @@ async fn handle_web_request(
 
             if let Some(cookie) = cookie_header {
                 if let Some(token) = get_token_value(&cookie) {
-                    if validate_auth_token(token, &settings) {
+                    info!("Download request from user {}", pubkey);
+                    if validate_auth_token(token, &key, &settings) {
                         let (results_tx, results_rx) = mpsc::channel::<Vec<Event>>(10);
 
                         if let Err(e) = repo.get_all_user_events(&key, results_tx, shutdown.resubscribe()).await {
@@ -579,6 +582,7 @@ async fn handle_web_request(
                             }
                         }
                     }
+                    warn!("Received invalid token from user {}: '{}'", pubkey, token);
                 }
             }
 

@@ -22,14 +22,14 @@ pub fn authenticate(key: &Keys, signature: &str) -> bool {
     false
 }
 
-pub fn generate_auth_token(public_key: &str, settings: &Settings) -> String {
-    let key: Hmac<Sha256> = Hmac::new_from_slice(settings.pay_to_relay.auth_secret.as_bytes()).unwrap();
+pub fn generate_auth_token(key: &Keys, settings: &Settings) -> String {
+    let signing_key: Hmac<Sha256> = Hmac::new_from_slice(settings.pay_to_relay.auth_secret.as_bytes()).unwrap();
     let mut claims = BTreeMap::new();
-    claims.insert("sub", public_key);
+    claims.insert("sub", key.public_key().to_string());
     let exp = Utc::now().checked_add_days(Days::new(1)).unwrap().to_rfc3339();
-    claims.insert("exp", &exp);
+    claims.insert("exp", exp);
 
-    claims.sign_with_key(&key).unwrap()
+    claims.sign_with_key(&signing_key).unwrap()
 }
 
 pub fn get_token_value(header: &HeaderValue) -> Option<&str> {
@@ -46,11 +46,14 @@ pub fn get_token_value(header: &HeaderValue) -> Option<&str> {
     None
 }
 
-pub fn validate_auth_token(token: &str, settings: &Settings) -> bool {
-    let key: Hmac<Sha256> = Hmac::new_from_slice(settings.pay_to_relay.auth_secret.as_bytes()).unwrap();
-    let verify_result: Result<BTreeMap<String, String>, jwt::Error> = token.verify_with_key(&key);
-    if let Ok(_claims) = verify_result {
-        return true;
+pub fn validate_auth_token(token: &str, key: &Keys, settings: &Settings) -> bool {
+    let signing_key: Hmac<Sha256> = Hmac::new_from_slice(settings.pay_to_relay.auth_secret.as_bytes()).unwrap();
+    let verify_result: Result<BTreeMap<String, String>, jwt::Error> = token.verify_with_key(&signing_key);
+    if let Ok(claims) = verify_result {
+        if let Some(sub) = claims.get("sub") {
+            let pubkey = key.public_key().to_string();
+            return *sub == pubkey;
+        }
     }
     false
 }

@@ -1239,11 +1239,11 @@ async fn nostr_server(
                         // An EventCmd needs to be validated to be converted into an Event
                         // handle each type of message
                         let evid = ec.event_id().to_owned();
-                        let parsed : Result<EventWrapper> = Result::<EventWrapper>::from(ec);
+                        let parsed: Result<EventWrapper> = Result::<EventWrapper>::from(ec);
                         match parsed {
                             Ok(WrappedEvent(e)) => {
                                 metrics.cmd_event.inc();
-                                let id_prefix:String = e.id.chars().take(8).collect();
+                                let id_prefix: String = e.id.chars().take(8).collect();
                                 debug!("successfully parsed/validated event: {:?} (cid: {}, kind: {})", id_prefix, cid, e.kind);
                                 // check if event is expired
                                 if e.is_expired() {

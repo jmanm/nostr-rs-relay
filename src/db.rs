@@ -12,6 +12,7 @@ use crate::server::NostrMetrics;
 use governor::clock::Clock;
 use governor::{Quota, RateLimiter};
 use log::LevelFilter;
+use nostr::event::{Kind, Tags};
 use nostr::key::PublicKey;
 use r2d2;
 use sqlx::pool::PoolOptions;
@@ -225,7 +226,25 @@ pub async fn db_writer(
             if whitelist.is_none()
                 || (whitelist.is_some() && !whitelist.as_ref().unwrap().contains(&event.pubkey))
             {
-                let key = PublicKey::from_str(&event.pubkey).unwrap();
+                let mut key = PublicKey::from_str(&event.pubkey).unwrap();
+
+                if event.kind == Kind::GiftWrap.as_u16() as u64 {
+                    match Tags::parse(&event.tags) {
+                        Err(e) => {
+                            notice_tx.try_send(Notice::error(event.id, &e.to_string())).ok();
+                            continue;
+                        }
+                        Ok(tags) => {
+                            let receivers: Vec<&PublicKey> = tags.public_keys().collect();
+                            if receivers.is_empty() {
+                                notice_tx.try_send(Notice::invalid(event.id, "No receivers for giftwrapped message")).ok();
+                                continue;
+                            }
+                            key = (*receivers.first().unwrap()).clone();
+                        }
+                    }
+                }
+                
                 match repo.get_account_balance(&key).await {
                     Ok((user_admitted, balance)) => {
                         // Checks to make sure user is admitted
@@ -260,7 +279,7 @@ pub async fn db_writer(
                         | Error::SqlxError(sqlx::Error::RowNotFound),
                     ) => {
                         // User does not exist
-                        info!("Unregistered user");
+                        info!("Unregistered user: {}", event.pubkey);
                         if settings.pay_to_relay.sign_ups && settings.pay_to_relay.direct_message {
                             payment_tx
                                 .send(PaymentMessage::NewAccount(event.pubkey))

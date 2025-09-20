@@ -65,6 +65,37 @@ use tungstenite::protocol::WebSocketConfig;
 use tera::{Context, Tera};
 use hyper_staticfile::Static;
 
+fn status_and_text(status: StatusCode, msg: &'static str) -> Response<Body> {
+    Response::builder()
+        .status(status)
+        .header("Content-Type", "text/plain")
+        .body(Body::from(msg))
+        .unwrap()
+}
+
+fn template(tera: &Tera, template: &'static str, ctx: &Context) -> Response<Body> {
+    // re-compile templates on each request when in debug mode
+    let html = if cfg!(debug_assertions) {
+        let mut mutable_tera = tera.clone();
+        mutable_tera.full_reload().unwrap();
+        mutable_tera.render(template, &ctx).unwrap()
+    } else {
+        tera.render(template, &ctx).unwrap()
+    };
+    Response::builder()
+        .status(StatusCode::OK)
+        .body(Body::from(html))
+        .unwrap()
+}
+
+fn redirect(location: &str) -> Response<Body> {
+    Response::builder()
+        .status(StatusCode::FOUND)
+        .header("location", location)
+        .body(Body::empty())
+        .unwrap()
+}
+
 /// Handle arbitrary HTTP requests, including for `WebSocket` upgrades.
 #[allow(clippy::too_many_arguments)]
 async fn handle_web_request(
@@ -190,11 +221,7 @@ async fn handle_web_request(
 
             // Redirect users to join page when pay to relay enabled
             if settings.pay_to_relay.enabled {
-                return Ok(Response::builder()
-                    .status(StatusCode::TEMPORARY_REDIRECT)
-                    .header("location", "/join")
-                    .body(Body::empty())
-                    .unwrap());
+                return Ok(redirect("/join"));
             }
 
             if let Some(relay_file_path) = settings.info.relay_page {
@@ -212,11 +239,7 @@ async fn handle_web_request(
                 }
             }
 
-            Ok(Response::builder()
-                .status(200)
-                .header("Content-Type", "text/plain")
-                .body(Body::from("Please use a Nostr client to connect."))
-                .unwrap())
+            Ok(status_and_text(StatusCode::OK, "Please use a Nostr client to connect."))
         }
         ("/metrics", false) => {
             let mut buffer = vec![];
@@ -238,86 +261,53 @@ async fn handle_web_request(
 
             if let Err(e) = payment_tx.send(PaymentMessage::InvoicePaid(callback.payment_hash)) {
                 warn!("Could not send invoice update: {}", e);
-                return Ok(Response::builder()
-                    .status(StatusCode::INTERNAL_SERVER_ERROR)
-                    .body(Body::from("Error processing callback"))
-                    .unwrap());
+                return Ok(status_and_text(StatusCode::INTERNAL_SERVER_ERROR, "Error processing callback"));
             }
 
-            Ok(Response::builder()
-                .status(StatusCode::OK)
-                .body(Body::from("ok"))
-                .unwrap())
+            Ok(status_and_text(StatusCode::OK, "ok"))
         }
         // Endpoint for relays terms
         ("/terms", false) => {
             let mut ctx = Context::new();
             ctx.insert("terms_message", &settings.pay_to_relay.terms_message);
-            let html = tera.render("terms.html", &ctx).unwrap();
-            Ok(Response::builder()
-                .status(200)
-                .body(Body::from(html))
-                .unwrap())
+            Ok(template(&tera, "terms.html", &ctx))
         }
         // Endpoint to allow users to sign up
         ("/join", false) => {
             // Stops sign ups if disabled
             if !settings.pay_to_relay.sign_ups {
-                return Ok(Response::builder()
-                    .status(401)
-                    .header("Content-Type", "text/plain")
-                    .body(Body::from("Sorry, joining is not allowed at the moment"))
-                    .unwrap());
+                return Ok(status_and_text(StatusCode::UNAUTHORIZED, "Sorry, joining is not allowed at the moment"));
             }
 
-            let html = tera.render("join.html", &Context::default()).unwrap();
-            Ok(Response::builder()
-                .status(StatusCode::OK)
-                .body(Body::from(html))
-                .unwrap())
+            Ok(template(&tera, "join.html", &Context::default()))
         }
         // Endpoint to display invoice
         ("/invoice", false) => {
             // Stops sign ups if disabled
             if !settings.pay_to_relay.sign_ups {
-                return Ok(Response::builder()
-                    .status(401)
-                    .header("Content-Type", "text/plain")
-                    .body(Body::from("Sorry, joining is not allowed at the moment"))
-                    .unwrap());
+                return Ok(status_and_text(StatusCode::UNAUTHORIZED, "Sorry, joining is not allowed at the moment"));
             }
 
             // Get query pubkey from query string
-            let pubkey = get_pubkey(request);
+            let pubkey = get_pubkey(&request);
 
             // Redirect back to join page if no pub key is found in query string
             if pubkey.is_none() {
-                return Ok(Response::builder()
-                    .status(302)
-                    .header("location", "/join")
-                    .body(Body::empty())
-                    .unwrap());
+                return Ok(redirect("/join"));
             }
 
             // Checks key is valid
             let pubkey = pubkey.unwrap();
             let key = Keys::from_pk_str(&pubkey);
             if key.is_err() {
-                return Ok(Response::builder()
-                    .status(401)
-                    .header("Content-Type", "text/plain")
-                    .body(Body::from("Looks like your key is invalid"))
-                    .unwrap());
+                return Ok(status_and_text(StatusCode::UNAUTHORIZED, "Looks like your key is invalid"));
             }
 
             // Checks if user is already admitted
             let payment_message;
             if let Ok((admission_status, _)) = repo.get_account_balance(&key.unwrap()).await {
                 if admission_status {
-                    return Ok(Response::builder()
-                        .status(StatusCode::OK)
-                        .body(Body::from("Already admitted"))
-                        .unwrap());
+                    return Ok(redirect(&format!("/account?pubkey={}", &pubkey)));
                 } else {
                     payment_message = PaymentMessage::CheckAccount(pubkey.clone());
                 }
@@ -328,11 +318,7 @@ async fn handle_web_request(
             // Send message on payment channel requesting invoice
             if payment_tx.send(payment_message).is_err() {
                 warn!("Could not send payment tx");
-                return Ok(Response::builder()
-                    .status(501)
-                    .header("Content-Type", "text/plain")
-                    .body(Body::from("Sorry, something went wrong"))
-                    .unwrap());
+                return Ok(status_and_text(StatusCode::NOT_IMPLEMENTED, "Sorry, something went wrong"));
             }
 
             // wait for message with invoice back that matched the pub key
@@ -347,10 +333,7 @@ async fn handle_web_request(
                     }
                     PaymentMessage::AccountAdmitted(m_pubkey) => {
                         if m_pubkey == pubkey.clone() {
-                            return Ok(Response::builder()
-                                .status(StatusCode::OK)
-                                .body(Body::from("Already admitted"))
-                                .unwrap());
+                            return Ok(redirect(&format!("/account?pubkey={}", &pubkey)));
                         }
                     }
                     _ => (),
@@ -359,10 +342,7 @@ async fn handle_web_request(
 
             // Return early if cant get invoice
             if invoice_info.is_none() {
-                return Ok(Response::builder()
-                    .status(StatusCode::INTERNAL_SERVER_ERROR)
-                    .body(Body::from("Sorry, could not get invoice"))
-                    .unwrap());
+                return Ok(status_and_text(StatusCode::INTERNAL_SERVER_ERROR, "Sorry, could not get invoice"));
             }
 
             // Since invoice is checked to be not none, unwrap
@@ -385,44 +365,28 @@ async fn handle_web_request(
             ctx.insert("qr_code", &qr_code);
             ctx.insert("bolt11", &invoice_info.bolt11);
             ctx.insert("pubkey", &pubkey);
-            let html = tera.render("invoice.html", &ctx).unwrap();
 
-            Ok(Response::builder()
-                .status(StatusCode::OK)
-                .body(Body::from(html))
-                .unwrap())
+            Ok(template(&tera, "invoice.html", &ctx))
         }
         ("/account", false) => {
             // Stops sign ups if disabled
             if !settings.pay_to_relay.enabled {
-                return Ok(Response::builder()
-                    .status(401)
-                    .header("Content-Type", "text/plain")
-                    .body(Body::from("This relay is not paid"))
-                    .unwrap());
+                return Ok(status_and_text(StatusCode::UNAUTHORIZED, "This relay is not paid"));
             }
 
             // Gets the pubkey from query string
-            let pubkey = get_pubkey(request);
+            let pubkey = get_pubkey(&request);
 
             // Redirect back to join page if no pub key is found in query string
             if pubkey.is_none() {
-                return Ok(Response::builder()
-                    .status(302)
-                    .header("location", "/join")
-                    .body(Body::empty())
-                    .unwrap());
+                return Ok(redirect("/join"));
             }
 
             // Checks key is valid
             let pubkey = pubkey.unwrap();
             let key = Keys::from_pk_str(&pubkey);
             if key.is_err() {
-                return Ok(Response::builder()
-                    .status(401)
-                    .header("Content-Type", "text/plain")
-                    .body(Body::from("Looks like your key is invalid"))
-                    .unwrap());
+                return Ok(status_and_text(StatusCode::UNAUTHORIZED, "Looks like your key is invalid"));
             }
 
             // Account is checked async so user will have to refresh the page a couple times after
@@ -445,12 +409,8 @@ async fn handle_web_request(
             let mut ctx = Context::new();
             ctx.insert("pubkey", &pubkey);
             ctx.insert("status", &status);
-            let html = tera.render("account.html", &ctx).unwrap();
 
-            Ok(Response::builder()
-                .status(StatusCode::OK)
-                .body(Body::from(html))
-                .unwrap())
+            Ok(template(&tera, "account.html", &ctx))
         }
         // later balance
         (_, _) => Ok(static_.serve(request).await.unwrap())
@@ -458,7 +418,7 @@ async fn handle_web_request(
 }
 
 // Get pubkey from request query string
-fn get_pubkey(request: Request<Body>) -> Option<String> {
+fn get_pubkey(request: &Request<Body>) -> Option<String> {
     let query = request.uri().query().unwrap_or("").to_string();
 
     // Gets the pubkey value from query string
@@ -995,17 +955,17 @@ async fn nostr_server(
     loop {
         tokio::select! {
             _ = shutdown.recv() => {
-        metrics.disconnects.with_label_values(&["shutdown"]).inc();
-                info!("Close connection down due to shutdown, client: {}, ip: {:?}, connected: {:?}", cid, conn.ip(), orig_start.elapsed());
-                // server shutting down, exit loop
-                break;
-            },
+                metrics.disconnects.with_label_values(&["shutdown"]).inc();
+                    info!("Close connection down due to shutdown, client: {}, ip: {:?}, connected: {:?}", cid, conn.ip(), orig_start.elapsed());
+                    // server shutting down, exit loop
+                    break;
+                },
             _ = ping_interval.tick() => {
                 // check how long since we talked to client
                 // if it has been too long, disconnect
                 if last_message_time.elapsed() > max_quiet_time {
                     debug!("ending connection due to lack of client ping response");
-            metrics.disconnects.with_label_values(&["timeout"]).inc();
+                    metrics.disconnects.with_label_values(&["timeout"]).inc();
                     break;
                 }
                 // Send a ping
@@ -1082,20 +1042,20 @@ async fn nostr_server(
                              WsError::Protocol(tungstenite::error::ProtocolError::ResetWithoutClosingHandshake)))
                         => {
                             debug!("websocket close from client (cid: {}, ip: {:?})",cid, conn.ip());
-                metrics.disconnects.with_label_values(&["normal"]).inc();
+                            metrics.disconnects.with_label_values(&["normal"]).inc();
                             break;
                         },
                     Some(Err(WsError::Io(e))) => {
                         // IO errors are considered fatal
                         warn!("IO error (cid: {}, ip: {:?}): {:?}", cid, conn.ip(), e);
-            metrics.disconnects.with_label_values(&["error"]).inc();
+                        metrics.disconnects.with_label_values(&["error"]).inc();
 
                         break;
                     }
                     x => {
                         // default condition on error is to close the client connection
                         info!("unknown error (cid: {}, ip: {:?}): {:?} (closing conn)", cid, conn.ip(), x);
-            metrics.disconnects.with_label_values(&["error"]).inc();
+                        metrics.disconnects.with_label_values(&["error"]).inc();
 
                         break;
                     }

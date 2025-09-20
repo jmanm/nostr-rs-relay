@@ -62,6 +62,39 @@ use tungstenite::error::Error as WsError;
 use tungstenite::handshake;
 use tungstenite::protocol::Message;
 use tungstenite::protocol::WebSocketConfig;
+use tera::{Context, Tera};
+use hyper_staticfile::Static;
+
+fn status_and_text(status: StatusCode, msg: &'static str) -> Response<Body> {
+    Response::builder()
+        .status(status)
+        .header("Content-Type", "text/plain")
+        .body(Body::from(msg))
+        .unwrap()
+}
+
+fn template(tera: &Tera, template: &'static str, ctx: &Context) -> Response<Body> {
+    // re-compile templates on each request when in debug mode
+    let html = if cfg!(debug_assertions) {
+        let mut mutable_tera = tera.clone();
+        mutable_tera.full_reload().unwrap();
+        mutable_tera.render(template, &ctx).unwrap()
+    } else {
+        tera.render(template, &ctx).unwrap()
+    };
+    Response::builder()
+        .status(StatusCode::OK)
+        .body(Body::from(html))
+        .unwrap()
+}
+
+fn redirect(location: &str) -> Response<Body> {
+    Response::builder()
+        .status(StatusCode::FOUND)
+        .header("location", location)
+        .body(Body::empty())
+        .unwrap()
+}
 
 /// Handle arbitrary HTTP requests, including for `WebSocket` upgrades.
 #[allow(clippy::too_many_arguments)]
@@ -74,9 +107,10 @@ async fn handle_web_request(
     event_tx: tokio::sync::mpsc::Sender<SubmittedEvent>,
     payment_tx: tokio::sync::broadcast::Sender<PaymentMessage>,
     shutdown: Receiver<()>,
-    favicon: Option<Vec<u8>>,
     registry: Registry,
     metrics: NostrMetrics,
+    tera: Arc<Tera>,
+    static_: Static,
 ) -> Result<Response<Body>, Infallible> {
     match (
         request.uri().path(),
@@ -187,11 +221,7 @@ async fn handle_web_request(
 
             // Redirect users to join page when pay to relay enabled
             if settings.pay_to_relay.enabled {
-                return Ok(Response::builder()
-                    .status(StatusCode::TEMPORARY_REDIRECT)
-                    .header("location", "/join")
-                    .body(Body::empty())
-                    .unwrap());
+                return Ok(redirect("/join"));
             }
 
             if let Some(relay_file_path) = settings.info.relay_page {
@@ -209,11 +239,7 @@ async fn handle_web_request(
                 }
             }
 
-            Ok(Response::builder()
-                .status(200)
-                .header("Content-Type", "text/plain")
-                .body(Body::from("Please use a Nostr client to connect."))
-                .unwrap())
+            Ok(status_and_text(StatusCode::OK, "Please use a Nostr client to connect."))
         }
         ("/metrics", false) => {
             let mut buffer = vec![];
@@ -227,23 +253,6 @@ async fn handle_web_request(
                 .body(Body::from(buffer))
                 .unwrap())
         }
-        ("/favicon.ico", false) => {
-            if let Some(favicon_bytes) = favicon {
-                info!("returning favicon");
-                Ok(Response::builder()
-                    .status(StatusCode::OK)
-                    .header("Content-Type", "image/x-icon")
-                    // 1 month cache
-                    .header("Cache-Control", "public, max-age=2419200")
-                    .body(Body::from(favicon_bytes))
-                    .unwrap())
-            } else {
-                Ok(Response::builder()
-                    .status(StatusCode::NOT_FOUND)
-                    .body(Body::from(""))
-                    .unwrap())
-            }
-        }
         // LN bits callback endpoint for paid invoices
         ("/lnbits", false) => {
             let callback: payment::lnbits::LNBitsCallback =
@@ -252,150 +261,53 @@ async fn handle_web_request(
 
             if let Err(e) = payment_tx.send(PaymentMessage::InvoicePaid(callback.payment_hash)) {
                 warn!("Could not send invoice update: {}", e);
-                return Ok(Response::builder()
-                    .status(StatusCode::INTERNAL_SERVER_ERROR)
-                    .body(Body::from("Error processing callback"))
-                    .unwrap());
+                return Ok(status_and_text(StatusCode::INTERNAL_SERVER_ERROR, "Error processing callback"));
             }
 
-            Ok(Response::builder()
-                .status(StatusCode::OK)
-                .body(Body::from("ok"))
-                .unwrap())
+            Ok(status_and_text(StatusCode::OK, "ok"))
         }
         // Endpoint for relays terms
-        ("/terms", false) => Ok(Response::builder()
-            .status(200)
-            .header("Content-Type", "text/plain")
-            .body(Body::from(settings.pay_to_relay.terms_message))
-            .unwrap()),
+        ("/terms", false) => {
+            let mut ctx = Context::new();
+            ctx.insert("terms_message", &settings.pay_to_relay.terms_message);
+            Ok(template(&tera, "terms.html", &ctx))
+        }
         // Endpoint to allow users to sign up
         ("/join", false) => {
             // Stops sign ups if disabled
             if !settings.pay_to_relay.sign_ups {
-                return Ok(Response::builder()
-                    .status(401)
-                    .header("Content-Type", "text/plain")
-                    .body(Body::from("Sorry, joining is not allowed at the moment"))
-                    .unwrap());
+                return Ok(status_and_text(StatusCode::UNAUTHORIZED, "Sorry, joining is not allowed at the moment"));
             }
 
-            let html = r#"
-<!doctype HTML>
-<head>
-  <meta charset="UTF-8">
-  <style>
-    body {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      text-align: center;
-      font-family: Arial, sans-serif;
-      background-color: #6320a7;
-      color: white;
-    }
-
-    .container {
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      height: 400px;
-    }
-
-    a {
-      color: pink;
-    }
-
-    input[type="text"] {
-        width: 100%;
-        max-width: 500px;
-        box-sizing: border-box;
-        overflow-x: auto;
-        white-space: nowrap;
-    }
-  </style>
-</head>
-<body>
-  <div style="width:75%;">
-    <h1>Enter your pubkey</h1>
-    <form action="/invoice" onsubmit="return checkForm(this);">
-      <input type="text" name="pubkey" id="pubkey-input"><br><br>
-      <input type="checkbox" id="terms" required>
-      <label for="terms">I agree to the <a href="/terms">terms and conditions</a></label><br><br>
-      <button type="submit">Submit</button>
-    </form>
-    <button id="get-public-key-btn">Get Public Key</button>
-  </div>
-  <script>
-    function checkForm(form) {
-      if (!form.terms.checked) {
-        alert("Please agree to the terms and conditions");
-        return false;
-      }
-      return true;
-    }
-
-    const pubkeyInput = document.getElementById('pubkey-input');
-      const getPublicKeyBtn = document.getElementById('get-public-key-btn');
-      getPublicKeyBtn.addEventListener('click', async function() {
-        try {
-          const publicKey = await window.nostr.getPublicKey();
-          pubkeyInput.value = publicKey;
-        } catch (error) {
-          console.error(error);
-        }
-      });
-  </script>
-</body>
-</html>
-            "#;
-            Ok(Response::builder()
-                .status(StatusCode::OK)
-                .body(Body::from(html))
-                .unwrap())
+            Ok(template(&tera, "join.html", &Context::default()))
         }
         // Endpoint to display invoice
         ("/invoice", false) => {
             // Stops sign ups if disabled
             if !settings.pay_to_relay.sign_ups {
-                return Ok(Response::builder()
-                    .status(401)
-                    .header("Content-Type", "text/plain")
-                    .body(Body::from("Sorry, joining is not allowed at the moment"))
-                    .unwrap());
+                return Ok(status_and_text(StatusCode::UNAUTHORIZED, "Sorry, joining is not allowed at the moment"));
             }
 
             // Get query pubkey from query string
-            let pubkey = get_pubkey(request);
+            let pubkey = get_pubkey(&request);
 
             // Redirect back to join page if no pub key is found in query string
             if pubkey.is_none() {
-                return Ok(Response::builder()
-                    .status(404)
-                    .header("location", "/join")
-                    .body(Body::empty())
-                    .unwrap());
+                return Ok(redirect("/join"));
             }
 
             // Checks key is valid
             let pubkey = pubkey.unwrap();
             let key = Keys::from_pk_str(&pubkey);
             if key.is_err() {
-                return Ok(Response::builder()
-                    .status(401)
-                    .header("Content-Type", "text/plain")
-                    .body(Body::from("Looks like your key is invalid"))
-                    .unwrap());
+                return Ok(status_and_text(StatusCode::UNAUTHORIZED, "Looks like your key is invalid"));
             }
 
             // Checks if user is already admitted
             let payment_message;
             if let Ok((admission_status, _)) = repo.get_account_balance(&key.unwrap()).await {
                 if admission_status {
-                    return Ok(Response::builder()
-                        .status(StatusCode::OK)
-                        .body(Body::from("Already admitted"))
-                        .unwrap());
+                    return Ok(redirect(&format!("/account?pubkey={}", &pubkey)));
                 } else {
                     payment_message = PaymentMessage::CheckAccount(pubkey.clone());
                 }
@@ -406,11 +318,7 @@ async fn handle_web_request(
             // Send message on payment channel requesting invoice
             if payment_tx.send(payment_message).is_err() {
                 warn!("Could not send payment tx");
-                return Ok(Response::builder()
-                    .status(501)
-                    .header("Content-Type", "text/plain")
-                    .body(Body::from("Sorry, something went wrong"))
-                    .unwrap());
+                return Ok(status_and_text(StatusCode::NOT_IMPLEMENTED, "Sorry, something went wrong"));
             }
 
             // wait for message with invoice back that matched the pub key
@@ -425,10 +333,7 @@ async fn handle_web_request(
                     }
                     PaymentMessage::AccountAdmitted(m_pubkey) => {
                         if m_pubkey == pubkey.clone() {
-                            return Ok(Response::builder()
-                                .status(StatusCode::OK)
-                                .body(Body::from("Already admitted"))
-                                .unwrap());
+                            return Ok(redirect(&format!("/account?pubkey={}", &pubkey)));
                         }
                     }
                     _ => (),
@@ -437,10 +342,7 @@ async fn handle_web_request(
 
             // Return early if cant get invoice
             if invoice_info.is_none() {
-                return Ok(Response::builder()
-                    .status(StatusCode::INTERNAL_SERVER_ERROR)
-                    .body(Body::from("Sorry, could not get invoice"))
-                    .unwrap());
+                return Ok(status_and_text(StatusCode::INTERNAL_SERVER_ERROR, "Sorry, could not get invoice"));
             }
 
             // Since invoice is checked to be not none, unwrap
@@ -458,129 +360,33 @@ async fn handle_web_request(
                 qr_code = "Could not render image".to_string();
             }
 
-            let html_result = format!(
-                r#"
-<!DOCTYPE html>
-<html>
-  <head>
-  <meta charset="UTF-8">
-    <style>
-      body {{
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        text-align: center;
-        font-family: Arial, sans-serif;
-        background-color:  #6320a7 ;
-        color: white;
-      }}
-      #copy-button {{
-        background-color: #bb5f0d ;
-        color: white;
-        padding: 10px 20px;
-        border-radius: 5px;
-        border: none;
-        cursor: pointer;
-      }}
-      #copy-button:hover {{
-        background-color: #8f29f4;
-      }}
-    .container {{
-        display: flex;
-        justify-content: center;
-        align-items: center;
-        height: 400px;
-    }}
-    a {{
-        color: pink;
-    }}
-    </style>
-  </head>
-  <body>
-    <div style="width:75%;">
-      <h3>
-        To use this relay, an admission fee of {} sats is required. By paying the fee, you agree to the <a href='terms'>terms</a>.
-      </h3>
-    </div>
-    <div>
-        <div style="max-height: 300px;">
-            {}
-        </div>
-    </div>
-    <div>
-    <div style="width: 75%;">
-        <p style="overflow-wrap: break-word; width: 500px;">{}</p>
-        <button id="copy-button">Copy</button>
-    </div>
-    <div>
-        <p> This page will not refresh </p>
-        <p> Verify admission <a href=/account?pubkey={}>here</a> once you have paid</p>
-    </div>
-    </div>
-  </body>
-</html>
+            let mut ctx = Context::new();
+            ctx.insert("admission_cost", &settings.pay_to_relay.admission_cost);
+            ctx.insert("qr_code", &qr_code);
+            ctx.insert("bolt11", &invoice_info.bolt11);
+            ctx.insert("pubkey", &pubkey);
 
-
-<script>
-  const copyButton = document.getElementById("copy-button");
-  if (navigator.clipboard) {{
-    copyButton.addEventListener("click", function() {{
-      const textToCopy = "{}";
-      navigator.clipboard.writeText(textToCopy).then(function() {{
-        console.log("Text copied to clipboard");
-      }}, function(err) {{
-        console.error("Could not copy text: ", err);
-      }});
-    }});
-  }} else {{
-    copyButton.style.display = "none";
-    console.warn("Clipboard API is not supported in this browser");
-  }}
-</script>
-"#,
-                settings.pay_to_relay.admission_cost,
-                qr_code,
-                invoice_info.bolt11,
-                pubkey,
-                invoice_info.bolt11
-            );
-
-            Ok(Response::builder()
-                .status(StatusCode::OK)
-                .body(Body::from(html_result))
-                .unwrap())
+            Ok(template(&tera, "invoice.html", &ctx))
         }
         ("/account", false) => {
             // Stops sign ups if disabled
             if !settings.pay_to_relay.enabled {
-                return Ok(Response::builder()
-                    .status(401)
-                    .header("Content-Type", "text/plain")
-                    .body(Body::from("This relay is not paid"))
-                    .unwrap());
+                return Ok(status_and_text(StatusCode::UNAUTHORIZED, "This relay is not paid"));
             }
 
             // Gets the pubkey from query string
-            let pubkey = get_pubkey(request);
+            let pubkey = get_pubkey(&request);
 
             // Redirect back to join page if no pub key is found in query string
             if pubkey.is_none() {
-                return Ok(Response::builder()
-                    .status(404)
-                    .header("location", "/join")
-                    .body(Body::empty())
-                    .unwrap());
+                return Ok(redirect("/join"));
             }
 
             // Checks key is valid
             let pubkey = pubkey.unwrap();
             let key = Keys::from_pk_str(&pubkey);
             if key.is_err() {
-                return Ok(Response::builder()
-                    .status(401)
-                    .header("Content-Type", "text/plain")
-                    .body(Body::from("Looks like your key is invalid"))
-                    .unwrap());
+                return Ok(status_and_text(StatusCode::UNAUTHORIZED, "Looks like your key is invalid"));
             }
 
             // Account is checked async so user will have to refresh the page a couple times after
@@ -589,66 +395,30 @@ async fn handle_web_request(
                 warn!("Could not check account: {}", e);
             }
             // Checks if user is already admitted
-            let text =
+            let status =
                 if let Ok((admission_status, _)) = repo.get_account_balance(&key.unwrap()).await {
                     if admission_status {
-                        r#"<span style="color: green;">is</span>"#
+                        "admitted"
                     } else {
-                        r#"<span style="color: red;">is not</span>"#
+                        "denied"
                     }
                 } else {
-                    "Could not get admission status"
+                    "unknown"
                 };
 
-            let html_result = format!(
-                r#"
-            <!DOCTYPE html>
-<html>
-  <head>
-    <meta charset="UTF-8">
-    <style>
-      body {{
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        text-align: center;
-        font-family: Arial, sans-serif;
-        background-color: #6320a7;
-        color: white;
-        height: 100vh;
-      }}
-    </style>
-  </head>
-  <body>
-    <div>
-      <h5>{} {} admitted</h5>
-    </div>
-  </body>
-</html>
+            let mut ctx = Context::new();
+            ctx.insert("pubkey", &pubkey);
+            ctx.insert("status", &status);
 
-
-            "#,
-                pubkey, text
-            );
-
-            Ok(Response::builder()
-                .status(StatusCode::OK)
-                .body(Body::from(html_result))
-                .unwrap())
+            Ok(template(&tera, "account.html", &ctx))
         }
         // later balance
-        (_, _) => {
-            // handle any other url
-            Ok(Response::builder()
-                .status(StatusCode::NOT_FOUND)
-                .body(Body::from("Nothing here."))
-                .unwrap())
-        }
+        (_, _) => Ok(static_.serve(request).await.unwrap())
     }
 }
 
 // Get pubkey from request query string
-fn get_pubkey(request: Request<Body>) -> Option<String> {
+fn get_pubkey(request: &Request<Body>) -> Option<String> {
     let query = request.uri().query().unwrap_or("").to_string();
 
     // Gets the pubkey value from query string
@@ -955,12 +725,20 @@ pub fn start_server(settings: &Settings, shutdown_rx: MpscReceiver<()>) -> Resul
         // spawn a task to check the pool size.
         //let pool_monitor = pool.clone();
         //tokio::spawn(async move {db::monitor_pool("reader", pool_monitor).await;});
-
-        // Read in the favicon if it exists
-        let favicon = settings.info.favicon.as_ref().and_then(|x| {
-            info!("reading favicon...");
-            file_bytes(x).ok()
-        });
+        let mut template_path = settings.info.template_path.clone().unwrap_or("templates/".into());
+        if !template_path.ends_with('/') {
+            template_path += "/";
+        }
+        let mut _tera = match Tera::new(&(template_path + "**/*.html")) {
+            Ok(t) => t,
+            Err(e) => {
+                println!("Parsing error(s): {}", e);
+                ::std::process::exit(1);
+            }
+        };
+        _tera.autoescape_on(vec![".html"]);
+        let tera = Arc::new(_tera);
+        let static_ = Static::new(Path::new("./public"));
 
         // A `Service` is needed for every connection, so this
         // creates one from our `handle_request` function.
@@ -972,9 +750,10 @@ pub fn start_server(settings: &Settings, shutdown_rx: MpscReceiver<()>) -> Resul
             let payment_tx = payment_tx.clone();
             let stop = invoke_shutdown.clone();
             let settings = settings.clone();
-            let favicon = favicon.clone();
             let registry = registry.clone();
             let metrics = metrics.clone();
+            let tera = tera.clone();
+            let static_ = static_.clone();
             async move {
                 // service_fn converts our function into a `Service`
                 Ok::<_, Infallible>(service_fn(move |request: Request<Body>| {
@@ -987,9 +766,10 @@ pub fn start_server(settings: &Settings, shutdown_rx: MpscReceiver<()>) -> Resul
                         event.clone(),
                         payment_tx.clone(),
                         stop.subscribe(),
-                        favicon.clone(),
                         registry.clone(),
                         metrics.clone(),
+                        tera.clone(),
+                        static_.clone(),
                     )
                 }))
             }
@@ -1175,17 +955,17 @@ async fn nostr_server(
     loop {
         tokio::select! {
             _ = shutdown.recv() => {
-        metrics.disconnects.with_label_values(&["shutdown"]).inc();
-                info!("Close connection down due to shutdown, client: {}, ip: {:?}, connected: {:?}", cid, conn.ip(), orig_start.elapsed());
-                // server shutting down, exit loop
-                break;
-            },
+                metrics.disconnects.with_label_values(&["shutdown"]).inc();
+                    info!("Close connection down due to shutdown, client: {}, ip: {:?}, connected: {:?}", cid, conn.ip(), orig_start.elapsed());
+                    // server shutting down, exit loop
+                    break;
+                },
             _ = ping_interval.tick() => {
                 // check how long since we talked to client
                 // if it has been too long, disconnect
                 if last_message_time.elapsed() > max_quiet_time {
                     debug!("ending connection due to lack of client ping response");
-            metrics.disconnects.with_label_values(&["timeout"]).inc();
+                    metrics.disconnects.with_label_values(&["timeout"]).inc();
                     break;
                 }
                 // Send a ping
@@ -1262,20 +1042,20 @@ async fn nostr_server(
                              WsError::Protocol(tungstenite::error::ProtocolError::ResetWithoutClosingHandshake)))
                         => {
                             debug!("websocket close from client (cid: {}, ip: {:?})",cid, conn.ip());
-                metrics.disconnects.with_label_values(&["normal"]).inc();
+                            metrics.disconnects.with_label_values(&["normal"]).inc();
                             break;
                         },
                     Some(Err(WsError::Io(e))) => {
                         // IO errors are considered fatal
                         warn!("IO error (cid: {}, ip: {:?}): {:?}", cid, conn.ip(), e);
-            metrics.disconnects.with_label_values(&["error"]).inc();
+                        metrics.disconnects.with_label_values(&["error"]).inc();
 
                         break;
                     }
                     x => {
                         // default condition on error is to close the client connection
                         info!("unknown error (cid: {}, ip: {:?}): {:?} (closing conn)", cid, conn.ip(), x);
-            metrics.disconnects.with_label_values(&["error"]).inc();
+                        metrics.disconnects.with_label_values(&["error"]).inc();
 
                         break;
                     }
